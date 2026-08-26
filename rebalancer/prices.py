@@ -71,8 +71,11 @@ def _num(v, default=0.0) -> float:
         return default
 
 
-def _yahoo_one(sess: requests.Session, sym: str, timeout: int) -> Quote | None:
-    """Ek symbol ka Yahoo se price. Fail hone par None -- crash nahi."""
+def _yahoo_one(sym: str, timeout: int) -> Quote | None:
+    """Ek symbol ka Yahoo se price. Fail hone par None -- crash nahi.
+    FIX: per-thread Session to avoid thread-safety issue."""
+    sess = requests.Session()
+    sess.headers.update({"User-Agent": _UA, "Accept": "application/json"})
     try:
         r = sess.get(YAHOO_URL.format(sym=sym),
                      params={"interval": "1d", "range": "1d"},
@@ -80,16 +83,31 @@ def _yahoo_one(sess: requests.Session, sym: str, timeout: int) -> Quote | None:
         if r.status_code != 200:
             log.debug("yahoo %s -> HTTP %s", sym, r.status_code)
             return None
-        meta = ((r.json().get("chart") or {}).get("result") or [{}])[0].get("meta") or {}
+        try:
+            meta = ((r.json().get("chart") or {}).get("result") or [{}])[0].get("meta") or {}
+        except (ValueError, KeyError, IndexError, AttributeError):
+            return None
     except (requests.RequestException, ValueError, KeyError, IndexError) as e:
         log.debug("yahoo %s fail: %s", sym, e)
         return None
+    finally:
+        sess.close()
 
     ltp = _num(meta.get("regularMarketPrice"))
     if ltp <= 0:
         return None
     ts = meta.get("regularMarketTime")
-    age = (time.time() - float(ts)) if ts else None
+    try:
+        age = (time.time() - float(ts)) if ts else None
+        if age is not None and age < 0:
+            age = 0  # clock skew
+        # stale check: if age > 3600 (1hr) mark as stale but still return - caller decides
+        # but we enforce max_age later
+        if age is not None and age > 7200:  # >2hr very stale, likely market closed
+            # still return but log
+            log.debug("yahoo %s age %.0f sec stale", sym, age)
+    except (TypeError, ValueError, OverflowError):
+        age = None
     return Quote(
         symbol=sym, ltp=ltp, source="yahoo",
         prev_close=_num(meta.get("chartPreviousClose")
@@ -104,11 +122,18 @@ def fetch_yahoo(symbols: Iterable[str], timeout: int = 10,
     syms = [s.strip().upper() for s in symbols if s and s.strip()]
     if not syms:
         return {}
-    sess = requests.Session()
-    sess.headers.update({"User-Agent": _UA, "Accept": "application/json"})
+    # fix: validate workers
+    try:
+        workers = int(workers)
+        if workers <= 0:
+            workers = 1
+        if workers > 16:
+            workers = 16
+    except (TypeError, ValueError):
+        workers = 4
     out: dict[str, Quote] = {}
     with ThreadPoolExecutor(max_workers=min(workers, len(syms))) as ex:
-        for q in ex.map(lambda s: _yahoo_one(sess, s, timeout), syms):
+        for q in ex.map(lambda s: _yahoo_one(s, timeout), syms):
             if q:
                 out[q.symbol] = q
     return out
@@ -124,7 +149,13 @@ def _nse_session(timeout: int) -> requests.Session:
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": NSE_HOME + "/get-quotes/equity",
     })
-    s.get(NSE_HOME, timeout=timeout)
+    try:
+        r = s.get(NSE_HOME, timeout=timeout)
+        if r.status_code not in (200, 301, 302):
+            log.debug("NSE home HTTP %s", r.status_code)
+    except requests.RequestException as e:
+        log.warning("NSE home fetch fail: %s", e)
+        # still return session - maybe quote works without cookie sometimes
     return s
 
 
@@ -144,11 +175,17 @@ def _nse_one(sess: requests.Session, sym: str, timeout: int) -> Quote | None:
     if ltp <= 0:
         return None
     band = pi.get("pPriceBand")
-    upper = _num(pi.get("upperCP")) or _num((pi.get("intraDayHighLow") or {}).get("max"))
-    lower = _num(pi.get("lowerCP")) or _num((pi.get("intraDayHighLow") or {}).get("min"))
+    # FIX: don't fallback to intraday high/low as circuit - they are not limits
+    upper = _num(pi.get("upperCP"))
+    lower = _num(pi.get("lowerCP"))
+    # only if both missing and band says no band, keep 0
     if isinstance(band, str) and band.lower() in ("no band", "nan", ""):
         upper = lower = 0.0
+    # do NOT fallback to max/min - that causes false circuit triggers
     vol = _num(((d.get("securityWiseDP") or {}).get("quantityTraded")))
+    # also try alternative field names for volume
+    if vol == 0:
+        vol = _num((d.get("securityWiseDP") or {}).get("tradedVolume") or d.get("tradedVolume"))
     return Quote(symbol=sym, ltp=ltp, source="nse",
                  prev_close=_num(pi.get("previousClose")),
                  volume=int(vol), upper=upper, lower=lower)
@@ -165,11 +202,18 @@ def fetch_nse(symbols: Iterable[str], timeout: int = 10) -> dict[str, Quote]:
         log.warning("NSE session nahi bana: %s", e)
         return {}
     out: dict[str, Quote] = {}
-    for s in syms:
+    for idx, s in enumerate(syms):
         q = _nse_one(sess, s, timeout)
         if q:
             out[s] = q
-        time.sleep(0.35)                 # NSE ko gussa mat dilao
+        # adaptive sleep with backoff on failure
+        if q is None and idx < len(syms) - 1:
+            time.sleep(0.6)
+        else:
+            time.sleep(0.5)                 # NSE ko gussa mat dilao - increased to 0.5
+        # if we get 429, extra cooldown
+        # note: _nse_one doesn't expose status, but we could detect rate limit via log
+    sess.close()
     return out
 
 
@@ -191,11 +235,21 @@ class FetchResult:
 
 
 def fetch(symbols: Iterable[str], order: Iterable[str] = ("yahoo", "nse"),
-          timeout: int = 10) -> FetchResult:
+          timeout: int = 10, max_age_sec: float = 900) -> FetchResult:
     """Ek ke baad ek provider try karo. Jo naam mil gaye, unhe dobara
-    nahi maangte -- sirf bache hue naam agle provider se."""
+    nahi maangte -- sirf bache hue naam agle provider se.
+    FIX: stale quotes >max_age_sec (default 15min) drop karo.
+    FIX: always try to enrich Yahoo quotes with NSE circuit even if Yahoo succeeded.
+    """
     want = [s.strip().upper() for s in symbols if s and s.strip()]
     res = FetchResult(missing=list(want))
+    # validate max_age
+    try:
+        max_age_sec = float(max_age_sec)
+        if max_age_sec != max_age_sec or max_age_sec <= 0 or max_age_sec > 86400:
+            max_age_sec = 900
+    except (TypeError, ValueError):
+        max_age_sec = 900
     for name in order:
         if not res.missing:
             break
@@ -211,9 +265,38 @@ def fetch(symbols: Iterable[str], order: Iterable[str] = ("yahoo", "nse"),
         if not got:
             res.errors.append(f"{name}: ek bhi price nahi mila.")
             continue
-        res.quotes.update(got)
-        res.sources[name] = res.sources.get(name, 0) + len(got)
-        res.missing = [s for s in res.missing if s not in got]
+        # stale filter
+        filtered = {}
+        for sym, q in got.items():
+            if q.age_sec is not None and q.age_sec > max_age_sec:
+                res.errors.append(f"{sym} {name} price {q.age_sec/60:.0f}m purana - stale, ignore")
+                res.missing.append(sym) if sym not in res.missing else None
+                continue
+            filtered[sym] = q
+        if not filtered:
+            res.errors.append(f"{name}: saare prices stale the (> {max_age_sec/60:.0f}m)")
+            continue
+        res.quotes.update(filtered)
+        res.sources[name] = res.sources.get(name, 0) + len(filtered)
+        res.missing = [s for s in res.missing if s not in filtered]
+    # FIX: if Yahoo was first and succeeded, still try NSE for circuit enrichment for those symbols
+    if "yahoo" in [str(x).lower() for x in order] and "nse" in [str(x).lower() for x in order]:
+        yahoo_syms = [s for s, q in res.quotes.items() if q.source == "yahoo" and not q.has_circuit]
+        if yahoo_syms:
+            try:
+                nse_extra = fetch_nse(yahoo_syms, timeout=min(timeout, 8))
+                for sym, nq in nse_extra.items():
+                    if sym in res.quotes and nq.has_circuit:
+                        # merge circuit into existing yahoo quote
+                        old = res.quotes[sym]
+                        res.quotes[sym] = Quote(symbol=old.symbol, ltp=old.ltp, source=old.source,
+                                                prev_close=old.prev_close or nq.prev_close,
+                                                volume=old.volume or nq.volume,
+                                                upper=nq.upper, lower=nq.lower,
+                                                age_sec=old.age_sec)
+                        log.debug("Enriched %s with NSE circuit", sym)
+            except Exception as e:
+                log.debug("NSE enrich fail: %s", e)
     ages = [q.age_sec for q in res.quotes.values() if q.age_sec is not None]
     res.max_age_sec = max(ages) if ages else 0.0
     return res

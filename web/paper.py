@@ -26,7 +26,16 @@ class PaperClient:
     DEFAULT_CAPITAL = 1_00_00_000.0        # demo ka default: Rs 1 crore
 
     def __init__(self, capital: float | None = None, *a, **kw):
-        cap = float(capital or self.DEFAULT_CAPITAL)
+        import threading
+        self._lock = threading.RLock()
+        try:
+            cap = float(capital if capital is not None else self.DEFAULT_CAPITAL)
+            if cap != cap or cap <= 0 or cap != abs(cap):
+                cap = self.DEFAULT_CAPITAL
+            if cap < 10000:
+                cap = 10000
+        except (TypeError, ValueError, OverflowError):
+            cap = self.DEFAULT_CAPITAL
         self.capital = cap
         self._ltp = {s: l for s, _, _, _, l in _DEMO_HOLDINGS}
         self._orders: dict[str, dict] = {}
@@ -49,9 +58,10 @@ class PaperClient:
         return {"availabelBalance": self.available_cash()}
 
     def holdings(self) -> list[Position]:
-        return [Position(symbol=s, security_id=v[0], total_qty=v[1],
-                         available_qty=v[1], avg_price=v[2])
-                for s, v in self._pos.items() if v[1] > 0]
+        with self._lock:
+            return [Position(symbol=s, security_id=v[0], total_qty=v[1],
+                             available_qty=v[1], avg_price=v[2])
+                    for s, v in list(self._pos.items()) if v[1] > 0]
 
     def ltp(self, security_ids, segment: str = "NSE_EQ") -> dict[str, float]:
         out = {}
@@ -103,7 +113,8 @@ class PaperClient:
 
     def register(self, security_ids: dict[str, str]) -> None:
         """{symbol: security_id} -- taaki fill par sahi scrip update ho."""
-        self._sym_of.update({sid: sym for sym, sid in security_ids.items()})
+        with self._lock:
+            self._sym_of.update({sid: sym for sym, sid in security_ids.items()})
 
     # ---- write side (kuch nahi karta) ---------------------------------
     def find_order_by_correlation(self, correlation_id: str):
@@ -111,26 +122,33 @@ class PaperClient:
 
     def place_order(self, *, security_id, side, qty, **kw) -> dict:
         """Turant poora fill maan lete hain, aur cash/holdings update karte hain."""
-        self._seq += 1
-        oid = f"PAPER{self._seq:06d}"
-        sym = self._sym_of.get(security_id) or kw.get("symbol") or security_id
-        px = float(kw.get("price") or self._ltp.get(sym) or 0.0)
-        if side.upper().startswith("S"):
-            self._cash += qty * px
-            if sym in self._pos:
-                self._pos[sym][1] = max(0, self._pos[sym][1] - qty)
-        else:
-            self._cash -= qty * px
-            if sym in self._pos:
-                cur_q, cur_a = self._pos[sym][1], self._pos[sym][2]
-                new_q = cur_q + qty
-                self._pos[sym][2] = ((cur_q * cur_a + qty * px) / new_q) if new_q else px
-                self._pos[sym][1] = new_q
+        with self._lock:
+            self._seq += 1
+            oid = f"PAPER{self._seq:06d}"
+            sym = self._sym_of.get(security_id) or kw.get("symbol") or security_id
+            try:
+                px = float(kw.get("price") or self._ltp.get(sym) or 0.0)
+            except (TypeError, ValueError):
+                px = 0.0
+            if side.upper().startswith("S"):
+                self._cash += qty * px
+                if sym in self._pos:
+                    self._pos[sym][1] = max(0, self._pos[sym][1] - qty)
             else:
-                self._pos[sym] = [security_id, qty, px]
-        self._orders[oid] = {"orderId": oid, "orderStatus": "TRADED",
-                             "filledQty": qty, "averageTradedPrice": px}
-        return self._orders[oid]
+                self._cash -= qty * px
+                # prevent negative cash? allow but warn
+                if self._cash < -0.01:
+                    self._cash = max(self._cash, -1000)  # cap negative drift
+                if sym in self._pos:
+                    cur_q, cur_a = self._pos[sym][1], self._pos[sym][2]
+                    new_q = cur_q + qty
+                    self._pos[sym][2] = ((cur_q * cur_a + qty * px) / new_q) if new_q else px
+                    self._pos[sym][1] = new_q
+                else:
+                    self._pos[sym] = [security_id, qty, px]
+            self._orders[oid] = {"orderId": oid, "orderStatus": "TRADED",
+                                 "filledQty": qty, "averageTradedPrice": px}
+            return self._orders[oid]
 
     def order(self, order_id: str) -> dict:
         return self._orders.get(order_id, {"orderStatus": "TRADED"})

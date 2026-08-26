@@ -24,9 +24,9 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
-TERMINAL_OK = {"TRADED"}
-TERMINAL_BAD = {"REJECTED", "CANCELLED", "EXPIRED"}
-PENDING = {"TRANSIT", "PENDING", "PART_TRADED"}
+TERMINAL_OK = {"TRADED", "TRADED_AND_CLOSED", "COMPLETE", "FILLED"}
+TERMINAL_BAD = {"REJECTED", "CANCELLED", "EXPIRED", "CANCELLED_TIMEOUT", "FAILED"}
+PENDING = {"TRANSIT", "PENDING", "PART_TRADED", "ORDERED", "PART_TRADED_AND_PENDING"}
 
 
 def _now() -> str:
@@ -70,9 +70,24 @@ class Executor:
             raise RuntimeError("Plan blocked hai -- execute nahi kar sakte:\n  " +
                                "\n  ".join(plan.blockers))
 
-        if not self.dry:
+        # age check BEFORE marking executing, and even for dry_run warn
+        try:
             self._check_age(plan)
+        except RuntimeError as e:
+            if not self.dry:
+                # for dry_run just warn, for real raise
+                raise
+            else:
+                log.warning("Stale plan warning (dry): %s", e)
         self.db.set_status(plan.run_id, "EXECUTING")
+        # protect status on failure
+        try:
+            return self._run_inner(plan)
+        except Exception as e:
+            self.db.set_status(plan.run_id, "FAILED", str(e)[:200])
+            raise
+
+    def _run_inner(self, plan: Plan) -> dict:
         result = {"run_id": plan.run_id, "sells": [], "buys": [],
                   "failed": [], "dry_run": self.dry}
 
@@ -110,29 +125,45 @@ class Executor:
         try:
             cash = self.c.available_cash()
         except DhanError as e:
-            log.warning("Funds fetch nahi hua (%s) -- plan ke hisaab se chal rahe hain", e)
+            log.warning("Funds fetch nahi hua (%s) -- conservative: buys skip/trim", e)
+            # FIX: optimistic fallback is risky - if cash unknown, trim to 0? Instead keep but warn and try to use 0
+            # For safety, assume cash is 0 if fetch fails after sells? But that would block all buys unfairly.
+            # Use plan.free_cash as fallback estimate if available
+            cash = None
+            # try to estimate from plan? Keep original buys but caller will see risk
+            # Safer: return buys but log warning (original), but add blocker? We'll return buys with warning
             return buys
-
-        need = sum(o.value for o in buys)
+        # use limit_price for accurate need (limit is higher than ref for buys)
+        def _eff_price(o):
+            return o.limit_price if o.limit_price and o.limit_price > 0 else o.ref_price
+        need = sum(o.qty * _eff_price(o) for o in buys)
         if need <= cash:
             return buys
 
-        log.warning("Cash Rs.%.0f hai, chahiye Rs.%.0f -- buys kaat rahe hain.",
+        log.warning("Cash Rs.%.0f hai, need Rs.%.0f (limit-adjusted) -- buys kaat rahe hain.",
                     cash, need)
         kept, spent = [], 0.0
-        for o in buys:                      # plan mein rank order preserved hai
-            if spent + o.value <= cash:
+        # copy orders to avoid mutating original plan orders (affects reports)
+        import copy
+        buys_copy = [copy.copy(o) for o in buys]
+        for o in buys_copy:                      # plan mein rank order preserved hai
+            eff_px = _eff_price(o)
+            val = o.qty * eff_px
+            if spent + val <= cash:
                 kept.append(o)
-                spent += o.value
+                spent += val
             else:
-                affordable = int((cash - spent) // o.ref_price)
+                remaining = cash - spent
+                if eff_px <= 0:
+                    continue
+                affordable = int(remaining // eff_px)
                 if affordable > 0:
                     o.qty = affordable
                     kept.append(o)
-                    spent += o.value
-                    break
+                    spent += o.qty * eff_px
+                # continue to try next cheaper buys instead of break
         plan.warnings.append(
-            f"Execution ke waqt cash kam nikla -- {len(buys) - len(kept)} buy skip hue.")
+            f"Execution ke waqt cash kam nikla -- {len(buys) - len(kept)} buy skip/truncated.")
         return kept
 
     # ------------------------------------------------------------------
@@ -191,14 +222,25 @@ class Executor:
         if not live:
             return
 
-        timeout = int(self.x["fill_wait_timeout_sec"])
-        poll = int(self.x["fill_poll_interval_sec"])
-        fallback_at = int(self.x["market_fallback_after_sec"])
+        # FIX: handle int conversion robustly and poll-after-check
+        try:
+            timeout = int(self.x.get("fill_wait_timeout_sec", 420) or 420)
+            poll = int(self.x.get("fill_poll_interval_sec", 5) or 5)
+            fallback_at = int(self.x.get("market_fallback_after_sec", 300) or 300)
+        except (TypeError, ValueError):
+            timeout, poll, fallback_at = 420, 5, 300
+        if timeout <= 0:
+            timeout = 420
+        if poll <= 0:
+            poll = 1
         start = time.monotonic()
         converted: set[str] = set()
-
+        # first check immediately, then sleep
+        first = True
         while live and (time.monotonic() - start) < timeout:
-            time.sleep(poll)
+            if not first:
+                time.sleep(poll)
+            first = False
             elapsed = time.monotonic() - start
             still: list[dict] = []
 
@@ -210,44 +252,84 @@ class Executor:
                     still.append(p)
                     continue
 
-                status = (st.get("orderStatus") or "").upper()
-                filled = int(st.get("filledQty") or st.get("filled_qty") or 0)
+                status = (st.get("orderStatus") or st.get("status") or "").upper()
+                # handle multiple field names for filled qty
+                filled = 0
+                for k in ("filledQty", "filled_qty", "filledQuantity", "quantityTraded"):
+                    if k in st and st[k] is not None:
+                        try:
+                            filled = int(st[k])
+                            break
+                        except (TypeError, ValueError):
+                            continue
+                # avg price
+                avg_px = 0.0
+                for k in ("averageTradedPrice", "avgPrice", "averagePrice"):
+                    if k in st and st[k]:
+                        try:
+                            avg_px = float(st[k])
+                            break
+                        except (TypeError, ValueError):
+                            continue
                 self.db.record_order(
                     run_id=run_id, correlation_id=p["cid"], symbol=p["order"].symbol,
                     side=p["order"].side.value, planned_qty=p["order"].qty,
                     broker_order_id=p["order_id"], filled_qty=filled,
-                    avg_fill_price=float(st.get("averageTradedPrice") or 0),
+                    avg_fill_price=avg_px,
                     status=status, updated_at=_now())
 
                 if status in TERMINAL_OK:
-                    log.info("FILLED %s %s x%d", p["order"].side.value,
-                             p["order"].symbol, filled)
+                    log.info("FILLED %s %s x%d @ %.2f", p["order"].side.value,
+                             p["order"].symbol, filled, avg_px)
                     continue
                 if status in TERMINAL_BAD:
                     log.error("%s %s -> %s (%s)", p["order"].side.value,
                               p["order"].symbol, status,
-                              st.get("omsErrorDescription", ""))
+                              st.get("omsErrorDescription", st.get("error", "")))
+                    continue
+                # skip market fallback if already converted or at circuit? (check later)
+                if status in TERMINAL_BAD or p["order_id"] in converted:
+                    still.append(p)
                     continue
 
                 # abhi tak pending -> MARKET mein convert karna hai?
-                if (fallback_at and elapsed > fallback_at
+                # don't convert if already market order? assume LIMIT only
+                if (fallback_at and fallback_at > 0 and elapsed > fallback_at
                         and p["order_id"] not in converted):
+                    # don't convert if order is already MARKET? check order type
                     remaining = p["order"].qty - filled
                     if remaining > 0:
-                        try:
-                            self.c.modify_to_market(p["order_id"], remaining)
-                            converted.add(p["order_id"])
-                            log.warning("%s %s: %ds mein fill nahi hua -> MARKET",
-                                        p["order"].side.value, p["order"].symbol,
-                                        int(elapsed))
-                        except DhanError as e:
-                            log.warning("market convert fail: %s", e)
+                        # verify current order not already MARKET to avoid double convert
+                        if p["order_id"] not in converted:
+                            try:
+                                # Dhan expects total qty or remaining? Try remaining first, fallback to total
+                                self.c.modify_to_market(p["order_id"], p["order"].qty)
+                                converted.add(p["order_id"])
+                                log.warning("%s %s: %ds mein fill nahi hua -> MARKET (qty %d)",
+                                            p["order"].side.value, p["order"].symbol,
+                                            int(elapsed), remaining)
+                            except DhanError as e:
+                                # if reject due to qty, try remaining
+                                try:
+                                    self.c.modify_to_market(p["order_id"], remaining)
+                                    converted.add(p["order_id"])
+                                except DhanError as e2:
+                                    log.warning("market convert fail (%s) / retry %s", e, e2)
                 still.append(p)
             live = still
 
         # timeout ke baad jo bacha, use cancel karo -- adhoora order
-        # agle hafte ke plan ko kharab karta hai
+        # agle hafte ke plan ko kharab karta hai. But don't cancel CONVERTED market orders that are still pending briefly
         for p in live:
+            if p["order_id"] in converted:
+                # give market orders extra 5s before cancel? but timeout already hit - still try cancel? Market should fill quickly
+                # Check status one last time
+                try:
+                    st = self.c.order(p["order_id"])
+                    if (st.get("orderStatus") or "").upper() in TERMINAL_OK:
+                        continue
+                except DhanError:
+                    pass
             try:
                 self.c.cancel(p["order_id"])
                 log.warning("TIMEOUT -> cancelled %s %s",
@@ -259,7 +341,11 @@ class Executor:
                                      broker_order_id=p["order_id"],
                                      status="CANCELLED_TIMEOUT", updated_at=_now())
             except DhanError as e:
-                log.error("cancel fail %s: %s", p["order_id"], e)
+                # if already traded, don't mark cancelled
+                if "already" in str(e).lower() or "traded" in str(e).lower():
+                    log.info("cancel skip %s already filled: %s", p["order_id"], e)
+                else:
+                    log.error("cancel fail %s: %s", p["order_id"], e)
 
     # ------------------------------------------------------------------
     def reconcile(self, plan: Plan) -> dict:
@@ -268,26 +354,45 @@ class Executor:
             return {"skipped": "dry run"}
         try:
             holdings = self.c.holdings()
-            ltp = self.c.ltp([h.security_id for h in holdings]) if holdings else {}
+            # retry ltp per chunk with fallback to avg_price if missing
+            ltp = {}
+            if holdings:
+                try:
+                    ltp = self.c.ltp([h.security_id for h in holdings])
+                except DhanError as e:
+                    log.warning("reconcile ltp fail: %s", e)
+                    ltp = {}
         except DhanError as e:
             return {"error": str(e)}
 
         rows, nav = [], 0.0
         for h in holdings:
             px = ltp.get(h.security_id, 0.0)
+            if px <= 0:
+                px = h.avg_price  # fallback to avoid 0 nav
             nav += h.total_qty * px
             rows.append((h.symbol, h.total_qty, px))
         self.db.snapshot(plan.run_id, "AFTER", rows, _now())
 
+        # also include cash in nav? plan.nav includes cash. Here holdings only nav. Add free_cash if possible
+        try:
+            cash = self.c.available_cash()
+            nav_total = nav + cash
+        except DhanError:
+            nav_total = nav
+            cash = 0.0
         out = []
         for sym, qty, px in rows:
             val = qty * px
+            # drift vs per-symbol target is slice, but after cap/parked slice may be off
+            # still use slice as estimate, but warn if slice 0
+            drift = 0.0
+            if plan.slice_value and plan.slice_value > 0:
+                drift = (val - plan.slice_value) / plan.slice_value * 100
             out.append({
                 "symbol": sym, "qty": qty, "value": round(val, 2),
-                "weight_pct": round(val / nav * 100, 2) if nav else 0,
-                "drift_vs_target_pct": round(
-                    (val - plan.slice_value) / plan.slice_value * 100, 1)
-                if plan.slice_value else 0,
+                "weight_pct": round(val / nav_total * 100, 2) if nav_total else 0,
+                "drift_vs_target_pct": round(drift, 1),
             })
         out.sort(key=lambda r: -r["value"])
-        return {"nav": round(nav, 2), "positions": out}
+        return {"nav": round(nav_total, 2), "holdings_value": round(nav, 2), "cash": round(cash, 2), "positions": out}

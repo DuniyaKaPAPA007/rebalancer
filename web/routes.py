@@ -33,6 +33,9 @@ from web.paper import PaperClient
 
 log = logging.getLogger("web")
 ROOT = Path(__file__).resolve().parents[1]
+import threading
+import re as _re_san
+STATE_LOCK = threading.RLock()
 
 # ---- server-side state (localhost, single user) -----------------------
 STATE: dict = {"watchlist": None, "wl_name": None, "wl_warnings": [],
@@ -59,17 +62,23 @@ STATE: dict = {"watchlist": None, "wl_name": None, "wl_warnings": [],
 def _cfg(apply_overrides: bool = True) -> dict:
     cfg = cfgmod.load(str(ROOT / "config.yaml"))
     if apply_overrides:
-        if STATE.get("n_override") is not None:
-            cfg["portfolio"]["n_stocks"] = STATE["n_override"]
-            cfg["portfolio"]["exit_rank_threshold"] = STATE["n_override"]
-        if STATE.get("overflow_override") is not None:
-            cfg["portfolio"]["use_overflow_slot"] = STATE["overflow_override"]
-        if STATE.get("deploy_mode") is not None:
-            cfg["portfolio"]["deploy_mode"] = STATE["deploy_mode"]
-            if STATE.get("deploy_pct") is not None:
-                cfg["portfolio"]["deploy_pct"] = STATE["deploy_pct"]
-            if STATE.get("deploy_amount") is not None:
-                cfg["portfolio"]["deploy_amount"] = STATE["deploy_amount"]
+        with STATE_LOCK:
+            n_ov = STATE.get("n_override")
+            of_ov = STATE.get("overflow_override")
+            dm = STATE.get("deploy_mode")
+            dp = STATE.get("deploy_pct")
+            da = STATE.get("deploy_amount")
+        if n_ov is not None:
+            cfg["portfolio"]["n_stocks"] = n_ov
+            cfg["portfolio"]["exit_rank_threshold"] = n_ov
+        if of_ov is not None:
+            cfg["portfolio"]["use_overflow_slot"] = of_ov
+        if dm is not None:
+            cfg["portfolio"]["deploy_mode"] = dm
+            if dp is not None:
+                cfg["portfolio"]["deploy_pct"] = dp
+            if da is not None:
+                cfg["portfolio"]["deploy_amount"] = da
     return cfg
 
 
@@ -122,33 +131,45 @@ def _autodetect_mode() -> None:
     Live ka matlab sirf itna hai ki DATA asli aayega. Order phir bhi
     rehearsal + "haan" + confirm ke bina nahi jaata.
     """
-    if STATE["mode_chosen_by_user"] or STATE["autodetect_settled"]:
-        return
-    if time.time() < STATE["autodetect_next_try"]:
-        return                       # abhi-abhi try kiya tha, ruko
-    STATE["autodetect_next_try"] = time.time() + 20    # cooldown
+    import time as _t
+    with STATE_LOCK:
+        if STATE["mode_chosen_by_user"] or STATE["autodetect_settled"]:
+            return
+        # use monotonic for cooldown to avoid NTP jump
+        now_m = _t.monotonic()
+        next_try = STATE.get("_next_try_monotonic", 0)
+        if now_m < next_try:
+            return                       # abhi-abhi try kiya tha, ruko
+        STATE["_next_try_monotonic"] = now_m + 20
+        STATE["autodetect_next_try"] = _t.time() + 20    # keep legacy wall field too
 
     if not _creds_present():
-        STATE["autodetect_settled"] = True             # ye badalne wala nahi
-        STATE["creds_broken"] = ""
-        STATE["autodetect_msg"] = ("Credentials nahi mile -- Demo mode. "
-                                   "Connection tab se jodo.")
+        with STATE_LOCK:
+            STATE["autodetect_settled"] = True             # ye badalne wala nahi
+            STATE["creds_broken"] = ""
+            STATE["autodetect_msg"] = ("Credentials nahi mile -- Demo mode. "
+                                       "Connection tab se jodo.")
         return
-    cfg = cfgmod.load(str(ROOT / "config.yaml"))
+    try:
+        cfg = cfgmod.load(str(ROOT / "config.yaml"))
+    except Exception as e:
+        log.warning("autodetect config load fail: %s", e)
+        return
     d = cfg["dhan"]
     cid, tok = _current_creds()
     res = credmod.verify(cid, tok, d["base_url"])
     if res.get("ok"):
         os.environ[d["client_id_env"]] = cid       # DhanClient ke liye
         os.environ[d["access_token_env"]] = tok
-        STATE["mode"] = "live"
-        STATE["autodetect_settled"] = True
-        STATE["creds_broken"] = ""
-        cash = res.get("cash")
-        STATE["autodetect_msg"] = (
-            f"Credentials verify ho gaye -- LIVE mode khud chalu kar diya. "
-            f"NAV tumhare asli Dhan account se aayega"
-            + (f" (free cash Rs.{cash:,.0f})." if cash is not None else "."))
+        with STATE_LOCK:
+            STATE["mode"] = "live"
+            STATE["autodetect_settled"] = True
+            STATE["creds_broken"] = ""
+            cash = res.get("cash")
+            STATE["autodetect_msg"] = (
+                f"Credentials verify ho gaye -- LIVE mode khud chalu kar diya. "
+                f"NAV tumhare asli Dhan account se aayega"
+                + (f" (free cash Rs.{cash:,.0f})." if cash is not None else "."))
         return
 
     bad = next((st for st in res.get("steps", []) if st["ok"] is False), None)
@@ -156,14 +177,15 @@ def _autodetect_mode() -> None:
     # Format/Token galat = pakka; ye khud theek nahi hoga.
     # Network/5xx = shayad temporary -- 20 sec baad dobara try karenge.
     permanent = bad_name in ("Format", "Token")
-    STATE["autodetect_settled"] = permanent
-    STATE["creds_broken"] = (bad["msg"] if bad else "Dhan se baat nahi ho payi.")
-    STATE["autodetect_msg"] = (
-        "Credentials mile par Dhan ne nahi maane -- Demo mode mein hoon. "
-        + (bad["msg"] if bad else "Connection tab se check karo.")
-        + ("" if permanent else
-           " Ye temporary bhi ho sakta hai -- app har 20 second dobara "
-           "koshish karti rahegi. Page refresh karke dekho."))
+    with STATE_LOCK:
+        STATE["autodetect_settled"] = permanent
+        STATE["creds_broken"] = (bad["msg"] if bad else "Dhan se baat nahi ho payi.")
+        STATE["autodetect_msg"] = (
+            "Credentials mile par Dhan ne nahi maane -- Demo mode mein hoon. "
+            + (bad["msg"] if bad else "Connection tab se check karo.")
+            + ("" if permanent else
+               " Ye temporary bhi ho sakta hai -- app har 20 second dobara "
+               "koshish karti rahegi. Page refresh karke dekho."))
 
 
 def _guard_broken() -> None:
@@ -182,11 +204,16 @@ def _guard_broken() -> None:
     User jaan-bujh kar Demo chun le toh alag baat -- tab chalne dete hain.
     """
     _autodetect_mode()
-    if STATE["creds_broken"] and not STATE["mode_chosen_by_user"]:
+    with STATE_LOCK:
+        broken = STATE.get("creds_broken")
+        chosen = STATE.get("mode_chosen_by_user")
+    if broken and not chosen:
+        # sanitize broken msg to avoid leaking raw http
+        safe_msg = _re_san.sub(r'[^\x20-\x7E\n]', '', str(broken))[:300]
         raise HTTPException(
             502,
             "Dhan se connect nahi ho pa raha, isliye ruk gaye.\n\n"
-            f"{STATE['creds_broken']}\n\n"
+            f"{safe_msg}\n\n"
             "Yahan NAKLI portfolio dikha kar tumhe dhoka dena sabse "
             "khatarnaak hota -- tum us par asli trade kar dete. Isliye "
             "kuch nahi dikha rahe.\n\n"
@@ -198,15 +225,21 @@ def _guard_broken() -> None:
 
 def _client(cfg: dict):
     """mode='live' hone par hi asli Dhan. Warna paper."""
-    if STATE["mode"] == "live":
+    with STATE_LOCK:
+        mode = STATE.get("mode")
+        paper = STATE.get("paper")
+        demo_cap = STATE.get("demo_capital")
+    if mode == "live":
         if not _creds_present():
             raise HTTPException(400, "Dhan credentials set nahi hain. "
                                      "creds.bat chalao ya Demo mode use karo.")
         return DhanClient(*cfgmod.credentials(cfg), base_url=cfg["dhan"]["base_url"])
     # Demo broker ek hi rehta hai taaki fills ke baad portfolio sach mein badle
-    if STATE["paper"] is None:
-        STATE["paper"] = PaperClient(STATE.get("demo_capital"))
-    return STATE["paper"]
+    with STATE_LOCK:
+        if STATE.get("paper") is None:
+            STATE["paper"] = PaperClient(STATE.get("demo_capital"))
+            return STATE["paper"]
+        return STATE["paper"]
 
 
 def _get_prices(c, security_ids: dict, cfg: dict) -> tuple[dict, dict, dict]:
@@ -407,11 +440,17 @@ def register_routes(app: FastAPI) -> None:
         if body.mode == "live" and not _creds_present():
             raise HTTPException(400, "Live mode ke liye Dhan credentials chahiye. "
                                      "creds.bat chala kar app dobara kholo.")
-        STATE["mode"] = body.mode
-        STATE["mode_chosen_by_user"] = True
-        STATE["plan"] = None
-        STATE["paper"] = None          # demo portfolio fresh
-        return {"mode": STATE["mode"]}
+        with STATE_LOCK:
+            STATE["mode"] = body.mode
+            STATE["mode_chosen_by_user"] = True
+            STATE["plan"] = None
+            STATE["paper"] = None          # demo portfolio fresh
+            # also reset autodetect latch so health etc reflects choice
+            # keep settled true to avoid re-autodetect after explicit choice
+            STATE["autodetect_settled"] = True
+            STATE["creds_broken"] = ""
+            mode = STATE["mode"]
+        return {"mode": mode}
 
     # ---------------------------------------------------- config
     @app.get("/api/config")
@@ -423,12 +462,28 @@ def register_routes(app: FastAPI) -> None:
     # ---------------------------------------------------- watchlist upload
     @app.post("/api/watchlist")
     async def upload_watchlist(file: UploadFile = File(...)):
+        # size via content-length header early + reading limit
+        # Use streaming read with limit to avoid OOM
         raw = await file.read()
         if len(raw) > 5_000_000:
             raise HTTPException(400, "File bahut badi hai (5 MB se zyada).")
+        # also enforce via content length if provided
+        if file.size and file.size > 5_000_000:
+            raise HTTPException(400, "File bahut badi hai (5 MB se zyada).")
         cfg = _cfg()
-        tmp = Path(tempfile.gettempdir()) / "rebal_upload.csv"
-        tmp.write_bytes(raw)
+        # use unique temp file per request
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".csv", prefix="rebal_upload_")
+        tmp = Path(tmp_path)
+        try:
+            os.write(tmp_fd, raw)
+            os.close(tmp_fd)
+            tmp_fd = -1
+        finally:
+            if tmp_fd != -1:
+                try:
+                    os.close(tmp_fd)
+                except:
+                    pass
         fmt, period, prev_period = "screener", None, None
         try:
             if wlmod._looks_like_backtest(tmp):
@@ -448,30 +503,58 @@ def register_routes(app: FastAPI) -> None:
             else:
                 wl = wlmod.read(tmp, rank_by=cfg["portfolio"].get("rank_by", "file_order"))
         except wlmod.WatchlistError as e:
+            try:
+                tmp.unlink(missing_ok=True)
+            except:
+                pass
             raise HTTPException(400, f"CSV padha nahi ja saka: {e}")
         except Exception as e:
-            raise HTTPException(400, f"CSV mein dikkat: {e}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except:
+                pass
+            # sanitize internal error
+            log.error("watchlist parse fail: %s", e, exc_info=True)
+            raise HTTPException(400, "CSV mein dikkat: file format check karo (Trendlyne export?)")
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except:
+                pass
         if not wl:
             raise HTTPException(400, "CSV mein koi stock nahi mila.")
 
-        n_cfg = cfg["portfolio"]["n_stocks"]
-        n_for_checks = 0 if str(n_cfg).strip().lower() == "auto" else int(n_cfg)
+        try:
+            n_cfg = cfg["portfolio"]["n_stocks"]
+            n_for_checks = 0 if str(n_cfg).strip().lower() == "auto" else int(float(str(n_cfg).strip()))
+        except (ValueError, TypeError):
+            n_for_checks = 0
+        try:
+            cap_cr = float(cfg["risk"].get("min_market_cap_cr", 0) or 0)
+        except (TypeError, ValueError):
+            cap_cr = 0
         warns = wlmod.sanity_checks(
             wl, n_for_checks,
             bool(cfg["portfolio"]["use_overflow_slot"]),
-            float(cfg["risk"].get("min_market_cap_cr", 0)))
+            cap_cr)
 
-        STATE.update(watchlist=wl, wl_name=file.filename,
-                     wl_warnings=warns, plan=None)
+        # sanitize filename - strip path, limit length, remove html
+        raw_name = file.filename or "upload.csv"
+        safe_name = Path(raw_name).name[:100]
+        safe_name = _re_san.sub(r'[<>&\"\'`]', '', safe_name)
+        with STATE_LOCK:
+            STATE.update(watchlist=wl, wl_name=safe_name,
+                         wl_warnings=warns, plan=None)
+            n_override_snapshot = STATE.get("n_override")
         from rebalancer.planner import resolve_n
         n = resolve_n(cfg["portfolio"], len(wl))
         use_of = bool(cfg["portfolio"]["use_overflow_slot"])
-        return {"count": len(wl), "filename": file.filename, "warnings": warns,
+        return {"count": len(wl), "filename": safe_name, "warnings": warns,
                 "n_stocks": n, "format": fmt, "period": period,
                 "prev_period": prev_period,
-                "auto": str(n_cfg).strip().lower() == "auto",
+                "auto": str(n_cfg).strip().lower() == "auto" if isinstance(n_cfg, str) else False,
                 "use_overflow": use_of,
-                "n_override": STATE.get("n_override"),
+                "n_override": n_override_snapshot,
                 "stocks": [{"rank": t.rank, "symbol": t.symbol,
                             "name": t.name, "ltp": t.ref_ltp,
                             "mcap_cr": t.market_cap_cr, "isin": t.isin,
@@ -780,15 +863,38 @@ def register_routes(app: FastAPI) -> None:
                 os.environ[d["client_id_env"]] = cid       # is session ke liye turant
                 os.environ[d["access_token_env"]] = tok
                 res["saved"] = True
-                if not STATE["mode_chosen_by_user"]:
-                    STATE["mode"] = "live"
-                    STATE["plan"] = None
+                with STATE_LOCK:
+                    if not STATE["mode_chosen_by_user"]:
+                        STATE["mode"] = "live"
+                        STATE["plan"] = None
+                    # reset autodetect latch on successful verify
+                    STATE["autodetect_settled"] = True
+                    STATE["creds_broken"] = ""
+                    STATE["autodetect_msg"] = "Credentials verify ho gaye -- LIVE"
+                    STATE["_next_try_monotonic"] = 0
             except OSError as e:
                 res["saved"] = False
                 res["save_error"] = str(e)
         elif res.get("ok"):
             os.environ[d["client_id_env"]] = cid
             os.environ[d["access_token_env"]] = tok
+            with STATE_LOCK:
+                STATE["autodetect_settled"] = True
+                STATE["creds_broken"] = ""
+                STATE["autodetect_msg"] = "Credentials verify ho gaye"
+                STATE["_next_try_monotonic"] = 0
+                if not STATE["mode_chosen_by_user"]:
+                    STATE["mode"] = "live"
+        else:
+            # failure reset latch for retry if transient? keep settled logic but update broken
+            with STATE_LOCK:
+                # if format/token permanent, settle, else allow retry in 20s
+                bad = next((st for st in res.get("steps", []) if st["ok"] is False), None)
+                bn = bad["name"] if bad else ""
+                permanent = bn in ("Format", "Token")
+                STATE["autodetect_settled"] = permanent
+                STATE["creds_broken"] = bad["msg"] if bad else "Verify fail"
+                STATE["_next_try_monotonic"] = time.monotonic() + (999999 if permanent else 20)
         return res
 
     @app.post("/api/prices/test")
@@ -847,31 +953,45 @@ def register_routes(app: FastAPI) -> None:
         removed = credmod.clear(ROOT)
         os.environ.pop(d["client_id_env"], None)
         os.environ.pop(d["access_token_env"], None)
-        if STATE["mode"] == "live":
-            STATE["mode"] = "paper"
-            STATE["plan"] = None
-        return {"removed": removed, "mode": STATE["mode"]}
+        with STATE_LOCK:
+            if STATE.get("mode") == "live":
+                STATE["mode"] = "paper"
+                STATE["plan"] = None
+            # reset autodetect so next health re-evaluates cleanly
+            STATE["autodetect_settled"] = False
+            STATE["creds_broken"] = ""
+            STATE["autodetect_msg"] = "Credentials cleared -- Demo mode"
+            STATE["_next_try_monotonic"] = 0
+            mode = STATE["mode"]
+        return {"removed": removed, "mode": mode}
 
     @app.post("/api/slots")
     def set_slots(body: SlotsIn):
         """Kitne stocks mein baantna hai -- config chhue bina."""
-        wl = STATE["watchlist"] or []
+        with STATE_LOCK:
+            wl = STATE.get("watchlist") or []
         if body.mode == "auto":
-            STATE["n_override"] = None
+            with STATE_LOCK:
+                STATE["n_override"] = None
         else:
             if body.n is None or body.n < 1:
                 raise HTTPException(400, "Kam se kam 1 stock chahiye.")
             if wl and body.n > len(wl):
                 raise HTTPException(
                     400, f"List mein sirf {len(wl)} naam hain, {body.n} nahi ho sakte.")
-            STATE["n_override"] = int(body.n)
+            with STATE_LOCK:
+                STATE["n_override"] = int(body.n)
         if body.use_overflow is not None:
-            STATE["overflow_override"] = bool(body.use_overflow)
-        STATE["plan"] = None
+            with STATE_LOCK:
+                STATE["overflow_override"] = bool(body.use_overflow)
+        with STATE_LOCK:
+            STATE["plan"] = None
         cfg = _cfg()
         from rebalancer.planner import resolve_n
         n = resolve_n(cfg["portfolio"], len(wl)) if wl else None
-        return {"n_stocks": n, "auto": STATE["n_override"] is None,
+        with STATE_LOCK:
+            auto = STATE.get("n_override") is None
+        return {"n_stocks": n, "auto": auto,
                 "use_overflow": bool(cfg["portfolio"]["use_overflow_slot"]),
                 "list_len": len(wl)}
 
@@ -947,35 +1067,36 @@ def register_routes(app: FastAPI) -> None:
         if mode not in ("all", "pct", "amount", "config"):
             raise HTTPException(400, "mode sirf all / pct / amount ho sakta hai.")
 
-        if mode == "config":
-            STATE["deploy_mode"] = STATE["deploy_pct"] = STATE["deploy_amount"] = None
-        elif mode == "pct":
-            if body.pct is None:
-                raise HTTPException(400, "Percent bhi bhejo (0 se 100).")
-            v = float(body.pct)
-            if v != v or v < 0 or v > 100:
-                raise HTTPException(
-                    400, f"Percent 0 se 100 ke beech hona chahiye, {body.pct} nahi.")
-            STATE["deploy_mode"] = "pct"
-            STATE["deploy_pct"] = v / 100.0
-            STATE["deploy_amount"] = None
-        elif mode == "amount":
-            if body.amount is None:
-                raise HTTPException(400, "Amount bhi bhejo (rupees mein).")
-            v = float(body.amount)
-            if v != v or v < 0:
-                raise HTTPException(400, "Amount negative nahi ho sakta.")
-            STATE["deploy_mode"] = "amount"
-            STATE["deploy_amount"] = v
-            STATE["deploy_pct"] = None
-        else:
-            STATE["deploy_mode"] = "all"
-            STATE["deploy_pct"] = None
-            STATE["deploy_amount"] = None
+        with STATE_LOCK:
+            if mode == "config":
+                STATE["deploy_mode"] = STATE["deploy_pct"] = STATE["deploy_amount"] = None
+            elif mode == "pct":
+                if body.pct is None:
+                    raise HTTPException(400, "Percent bhi bhejo (0 se 100).")
+                v = float(body.pct)
+                if v != v or v < 0 or v > 100:
+                    raise HTTPException(
+                        400, f"Percent 0 se 100 ke beech hona chahiye, {body.pct} nahi.")
+                STATE["deploy_mode"] = "pct"
+                STATE["deploy_pct"] = v / 100.0
+                STATE["deploy_amount"] = None
+            elif mode == "amount":
+                if body.amount is None:
+                    raise HTTPException(400, "Amount bhi bhejo (rupees mein).")
+                v = float(body.amount)
+                if v != v or v < 0:
+                    raise HTTPException(400, "Amount negative nahi ho sakta.")
+                STATE["deploy_mode"] = "amount"
+                STATE["deploy_amount"] = v
+                STATE["deploy_pct"] = None
+            else:
+                STATE["deploy_mode"] = "all"
+                STATE["deploy_pct"] = None
+                STATE["deploy_amount"] = None
 
-        # Setting badli = purana plan jhootha ho gaya. Hata do, warna user
-        # naye budget ke bharose purana plan execute kar dega.
-        STATE["plan"] = None
+            # Setting badli = purana plan jhootha ho gaya. Hata do, warna user
+            # naye budget ke bharose purana plan execute kar dega.
+            STATE["plan"] = None
         return get_deploy()
 
     @app.post("/api/demo/capital")

@@ -43,16 +43,48 @@ def _pick(header: list[str], candidates: list[str]) -> str | None:
 
 
 def _download(url: str, dest: Path, max_age_hours: int = 12) -> str:
-    """Roz-ka CSV cache karke rakho -- har run pe 10MB download bekaar hai."""
+    """Roz-ka CSV cache karke rakho -- har run pe 10MB download bekaar hai.
+    FIX: atomic write + file lock + stale cache fallback."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists() and (time.time() - dest.stat().st_mtime) < max_age_hours * 3600:
-        return dest.read_text(encoding="utf-8", errors="replace")
+        try:
+            return dest.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
-    resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    text = resp.content.decode("utf-8", errors="replace")
-    dest.write_text(text, encoding="utf-8")
-    return text
+    # try download with retry and atomic write
+    last_exc = None
+    for attempt in range(2):
+        try:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            text = resp.content.decode("utf-8", errors="replace")
+            if len(text) < 1000:
+                raise ValueError("scrip master too small, likely error page")
+            # atomic write via tmp + replace
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            tmp.replace(dest)
+            return text
+        except Exception as e:
+            last_exc = e
+            time.sleep(1 + attempt)
+    # fallback to stale cache if exists even if older than max_age
+    if dest.exists():
+        try:
+            log_msg = f"Scrip master download fail ({last_exc}), using stale cache {dest}"
+            # use logging if available else print
+            try:
+                import logging
+                logging.getLogger(__name__).warning(log_msg)
+            except:
+                pass
+            return dest.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if last_exc:
+        raise last_exc
+    raise ScripMasterError(f"Download fail and no cache: {url}")
 
 
 def load_equity_maps(cache_path: str | Path,

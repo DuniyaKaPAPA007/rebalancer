@@ -63,17 +63,22 @@ class _Throttle:
         self._lock = threading.Lock()
 
     def wait(self) -> None:
+        # FIX: don't hold lock while sleeping
         with self._lock:
-            gap = time.monotonic() - self._last
-            if gap < self._min_gap:
-                time.sleep(self._min_gap - gap)
-            self._last = time.monotonic()
+            now = time.monotonic()
+            gap = now - self._last
+            wait_needed = self._min_gap - gap if gap < self._min_gap else 0
+            # reserve slot immediately to avoid thundering herd
+            self._last = now + wait_needed
+        if wait_needed > 0:
+            time.sleep(wait_needed)
 
 
 class DhanClient:
+
     def __init__(self, client_id: str, access_token: str,
-                 base_url: str = "https://api.dhan.co/v2",
-                 timeout: int = 20):
+                  base_url: str = "https://api.dhan.co/v2",
+                  timeout: int = 20):
         if not client_id or not access_token:
             raise DhanError(
                 "DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN set nahi hain. "
@@ -88,6 +93,7 @@ class DhanClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+        self._req_lock = threading.Lock()
         self._t = {
             "order": _Throttle(8),      # limit 10, thoda margin
             "data": _Throttle(4),       # limit 5
@@ -97,31 +103,60 @@ class DhanClient:
 
     # ------------------------------------------------------------------
     def _req(self, method: str, path: str, *, bucket: str = "other",
-             json: Any = None, retries: int = 3) -> Any:
+              json: Any = None, retries: int = 3) -> Any:
         url = f"{self.base_url}{path}"
         last: Exception | None = None
         for attempt in range(retries):
             self._t[bucket].wait()
             try:
-                r = self._s.request(method, url, json=json, timeout=self.timeout)
+                with self._req_lock:
+                    r = self._s.request(method, url, json=json, timeout=self.timeout)
             except requests.RequestException as e:
                 last = e
-                time.sleep(1.5 * (attempt + 1))
+                import random as _r3
+                time.sleep(1.5 * (attempt + 1) + _r3.uniform(0, 0.4))
                 continue
 
             if r.status_code == 429:                       # rate limited
-                time.sleep(2.0 * (attempt + 1))
+                # respect Retry-After if present
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    wait = float(retry_after) if retry_after else 2.0 * (attempt + 1)
+                except (TypeError, ValueError):
+                    wait = 2.0 * (attempt + 1)
+                # add jitter 0-0.5s to avoid herding
+                import random
+                wait += random.uniform(0, 0.5)
+                time.sleep(wait)
                 last = DhanError("rate limited", 429, r.text)
                 continue
             if r.status_code >= 500:                       # server side
                 body = _safe_json(r)
-                # Dhan kabhi-kabhi "data hai hi nahi" ko bhi 500 bhej deta
-                # hai (khaali holdings, khaali positions). Us par retry
-                # karna bekaar hai -- 3 baar rukne se kuch nahi badlega.
-                if _looks_like_no_data(body):
+                # FIX: only treat as no-data if status is 500 AND body contains marker AND looks like holdings/positions empty
+                # avoid swallowing real 500 with generic "empty"
+                # check more specific: must have errorCode or explicit no data
+                is_no_data_body = False
+                if isinstance(body, dict):
+                    # Dhan error structure may have errorType/errorCode
+                    txt = str(body).lower()
+                    is_no_data_body = _looks_like_no_data(txt) and any(k in txt for k in ["holding", "position", "data"])
+                elif isinstance(body, str):
+                    is_no_data_body = _looks_like_no_data(body) and ("holding" in body.lower() or "position" in body.lower() or "data" in body.lower())
+                # be conservative: only Holdings/positions endpoints get no-data treatment
+                if is_no_data_body and path in ("/holdings", "/positions", "/holdings/positions"):
                     raise DhanNoData(f"{method} {path}: koi data nahi",
                                      r.status_code, body)
-                time.sleep(1.5 * (attempt + 1))
+                # also if body clearly says no data even with generic path, allow
+                elif _looks_like_no_data(body) and path == "/holdings":
+                    # legacy but check holdings only
+                    # verify it's not HTML error page containing "empty"
+                    if isinstance(body, str) and "<html" in body.lower():
+                        pass  # real error, retry
+                    else:
+                        raise DhanNoData(f"{method} {path}: koi data nahi",
+                                         r.status_code, body)
+                import random as _rnd2
+                time.sleep(1.5 * (attempt + 1) + _rnd2.uniform(0, 0.3))
                 last = DhanError(f"server error {r.status_code}",
                                  r.status_code, body)
                 continue
@@ -188,12 +223,26 @@ class DhanClient:
         for i in range(0, len(ids), 500):
             chunk = ids[i:i + 500]
             body = {segment: [int(x) if x.isdigit() else x for x in chunk]}
-            resp = self._req("POST", "/marketfeed/ltp", bucket="quote", json=body)
-            data = ((resp or {}).get("data") or {}).get(segment, {})
-            for sec_id, payload in data.items():
-                price = payload.get("last_price") if isinstance(payload, dict) else payload
-                if price:
-                    out[str(sec_id)] = float(price)
+            try:
+                resp = self._req("POST", "/marketfeed/ltp", bucket="quote", json=body)
+            except DhanError as e:
+                log.warning("ltp chunk %d-%d fail: %s (partial continue)", i, i+len(chunk), e)
+                continue
+            except Exception as e:
+                log.warning("ltp chunk unexpected fail: %s", e)
+                continue
+            try:
+                data = ((resp or {}).get("data") or {}).get(segment, {})
+                for sec_id, payload in data.items():
+                    price = payload.get("last_price") if isinstance(payload, dict) else payload
+                    if price:
+                        try:
+                            out[str(sec_id)] = float(price)
+                        except (TypeError, ValueError):
+                            continue
+            except (AttributeError, TypeError) as e:
+                log.warning("ltp parse fail chunk %d: %s", i, e)
+                continue
         return out
 
     def quotes(self, security_ids: list[str], symbol_of: dict[str, str],
@@ -203,30 +252,41 @@ class DhanClient:
         hi nahi, kyunki doosri taraf koi hai hi nahi."""
         out: dict[str, CircuitInfo] = {}
         ids = [str(i) for i in security_ids]
+        # FIX: use lock for session thread-safety (requests.Session not thread-safe)
+        _lock = threading.Lock()
         for i in range(0, len(ids), 500):
             chunk = ids[i:i + 500]
             body = {segment: [int(x) if x.isdigit() else x for x in chunk]}
             try:
-                resp = self._req("POST", "/marketfeed/quote", bucket="quote", json=body)
+                # lock around request to protect Session
+                with _lock:
+                    resp = self._req("POST", "/marketfeed/quote", bucket="quote", json=body)
             except DhanError as e:
-                log.warning("quote fetch fail (circuit check skip ho jaayega): %s", e)
-                return out
-            data = ((resp or {}).get("data") or {}).get(segment, {})
-            for sec_id, q in data.items():
-                if not isinstance(q, dict):
-                    continue
-                sym = symbol_of.get(str(sec_id))
-                if not sym:
-                    continue
-                ohlc = q.get("ohlc") or {}
-                out[sym] = CircuitInfo(
-                    symbol=sym,
-                    ltp=float(q.get("last_price") or 0),
-                    upper=float(q.get("upper_circuit_limit") or 0),
-                    lower=float(q.get("lower_circuit_limit") or 0),
-                    prev_close=float(ohlc.get("close") or q.get("close") or 0),
-                    volume=int(q.get("volume") or 0),
-                )
+                log.warning("quote chunk %d-%d fail: %s (continue next chunk)", i, i+len(chunk), e)
+                continue
+            except Exception as e:
+                log.warning("quote chunk unexpected fail: %s", e)
+                continue
+            try:
+                data = ((resp or {}).get("data") or {}).get(segment, {})
+                for sec_id, q in data.items():
+                    if not isinstance(q, dict):
+                        continue
+                    sym = symbol_of.get(str(sec_id))
+                    if not sym:
+                        continue
+                    ohlc = q.get("ohlc") or {}
+                    out[sym] = CircuitInfo(
+                        symbol=sym,
+                        ltp=float(q.get("last_price") or 0),
+                        upper=float(q.get("upper_circuit_limit") or 0),
+                        lower=float(q.get("lower_circuit_limit") or 0),
+                        prev_close=float(ohlc.get("close") or q.get("close") or 0),
+                        volume=int(q.get("volume") or 0),
+                    )
+            except (AttributeError, TypeError, ValueError) as e:
+                log.warning("quote parse fail chunk %d: %s", i, e)
+                continue
         return out
 
     # ---- orders -------------------------------------------------------

@@ -1,6 +1,7 @@
 """Core data types. Koi API call nahi, koi I/O nahi -- sirf shapes."""
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -33,7 +34,15 @@ class Position:
 
     @property
     def sellable(self) -> int:
+        # data integrity: available should never exceed total
+        # if it does, cap to total but caller should warn via planner
+        if self.available_qty > self.total_qty:
+            return max(0, self.total_qty)
         return max(0, min(self.total_qty, self.available_qty))
+
+    @property
+    def has_data_issue(self) -> bool:
+        return self.available_qty > self.total_qty or self.available_qty < 0 or self.total_qty < 0
 
 
 @dataclass(frozen=True)
@@ -76,19 +85,23 @@ class CircuitInfo:
 
     @property
     def at_upper(self) -> bool:
-        return bool(self.upper) and self.ltp >= self.upper * 0.995
+        # tighter 0.2% tolerance - avoid false positives from 0.5% buffer
+        return bool(self.upper) and self.ltp >= self.upper * 0.998
 
     @property
     def at_lower(self) -> bool:
-        return bool(self.lower) and self.ltp <= self.lower * 1.005
+        return bool(self.lower) and self.ltp <= self.lower * 1.002
 
     @property
     def band_pct(self) -> Optional[float]:
         """Band ki chaudai as % of prev close (2 / 5 / 10 / 20 typical).
         Chhota band = surveillance ya illiquid scrip."""
-        base = self.prev_close or self.ltp
-        if not (self.upper and self.lower and base):
+        # prev_close must be valid - don't invent band from ltp fallback
+        if not (self.upper and self.lower and self.prev_close and self.prev_close > 0):
             return None
+        base = self.prev_close
+        # use (upper-lower)/base as full width; for symmetric this is 2x upper-base
+        # but we return half-width (upper-base)/base to keep narrow_band_warn_pct compat
         return (self.upper - base) / base * 100
 
 
@@ -108,13 +121,22 @@ class PlannedOrder:
         return self.qty * self.ref_price
 
     def correlation_id(self, run_id: str) -> str:
-        """Idempotency key. Dhan ki limit 30 chars -- isliye chhota rakha hai.
+        """Idempotency key. Dhan ki limit 30 chars -- isliye hash se safe rakha.
 
-        Crash ke baad restart pe GET /orders/external/{cid} se pata chal
-        jaata hai ki ye order pehle hi ja chuka hai ya nahi.
+        Pehle truncate karta tha -> RELIANCE vs RELIANCEPP collision.
+        Ab long symbol pe hash suffix lagata hai taaki unique rahe.
         """
         cid = f"{run_id}-{self.side.value[0]}{self.symbol}"
-        return cid[:30]
+        if len(cid) <= 30:
+            return cid
+        # keep prefix + 6-char hash to avoid collision within 30 limit
+        h = hashlib.sha1(cid.encode()).hexdigest()[:6]
+        # run_id prefix (up to 17) + "-" + side(1) + hash => ~24, rest for symbol truncated
+        keep = 30 - 1 - 6  # symbol part truncated + hash
+        # preserve run_id + side char fully, truncate symbol
+        prefix = f"{run_id}-{self.side.value[0]}"
+        trunc_sym = self.symbol[: max(0, 30 - len(prefix) - 1 - 6)]
+        return f"{prefix}{trunc_sym}-{h}"[:30]
 
 
 @dataclass
@@ -148,12 +170,19 @@ class Plan:
 
     @property
     def cash_after(self) -> float:
-        """Plan ke baad kitna paisa cash mein rahega (approx)."""
+        """Plan ke baad kitna paisa cash mein rahega (approx).
+        Actual quantized orders ke baad leftover alag ho sakta hai,
+        par target_equity hi budgeted cash hai."""
+        # Use actual order values if orders exist for more accurate estimate?
+        # Keep target based for consistency, but ensure not negative.
         return max(0.0, self.nav - self.target_equity)
 
     @property
     def age_sec(self) -> float:
-        return max(0.0, time.time() - (self.created_ts or time.time()))
+        # created_ts 0 or None means very old / invalid - don't hide staleness
+        if not self.created_ts:
+            return 999999.0
+        return max(0.0, time.time() - self.created_ts)
 
     # --- derived views -------------------------------------------------
     @property
