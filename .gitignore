@@ -1,0 +1,16 @@
+# Creds -- ye kabhi commit nahi hone chahiye
+creds.bat
+creds.bat.removed
+.env
+
+# App state
+runs.db
+plans/
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+.venv/

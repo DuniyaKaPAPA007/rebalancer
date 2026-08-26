@@ -1,0 +1,105 @@
+"""Config loading + fail-fast validation."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+REQUIRED = {
+    "dhan": ["client_id_env", "access_token_env", "base_url",
+             "exchange_segment", "product_type"],
+    "portfolio": ["n_stocks", "exit_rank_threshold", "drift_band_pct",
+                  "cash_reserve_pct", "use_overflow_slot"],
+    "costs": ["min_trade_value_inr", "min_trade_pct_of_slice",
+              "est_sell_cost_pct", "est_buy_cost_pct", "dp_charge_per_scrip_inr"],
+    "execution": ["order_type", "limit_buffer_pct", "market_fallback_after_sec",
+                  "fill_poll_interval_sec", "fill_wait_timeout_sec", "phase_gap_sec"],
+    "risk": ["max_turnover_pct", "max_single_order_value_inr",
+             "min_price_inr", "allowed_window"],
+    "paths": ["watchlist", "db", "plans_dir", "instruments_cache"],
+}
+
+
+class ConfigError(RuntimeError):
+    pass
+
+
+def load(path: str | Path = "config.yaml") -> dict[str, Any]:
+    p = Path(path)
+    if not p.exists():
+        raise ConfigError(f"{p} nahi mila.")
+    cfg = yaml.safe_load(p.read_text()) or {}
+
+    for section, keys in REQUIRED.items():
+        if section not in cfg:
+            raise ConfigError(f"config.yaml mein '{section}' section missing hai.")
+        for k in keys:
+            if k not in cfg[section]:
+                raise ConfigError(f"config.yaml: {section}.{k} missing hai.")
+
+    n_raw = str(cfg["portfolio"]["n_stocks"]).strip().lower()
+    e_raw = str(cfg["portfolio"]["exit_rank_threshold"]).strip().lower()
+    if n_raw != "auto":
+        n = int(cfg["portfolio"]["n_stocks"])
+        if n < 1:
+            raise ConfigError("n_stocks kam se kam 1 hona chahiye (ya 'auto').")
+        if e_raw != "auto" and int(cfg["portfolio"]["exit_rank_threshold"]) < n:
+            raise ConfigError(
+                "exit_rank_threshold, n_stocks se chhota nahi ho sakta "
+                "(warna jo naam abhi khareeda wahi turant exit ho jaayega).")
+    if not 0 <= float(cfg["portfolio"]["cash_reserve_pct"]) < 0.5:
+        raise ConfigError("cash_reserve_pct 0 aur 0.5 ke beech rakho.")
+    # ---- deploy budget (optional -- purani config.yaml bhi chalti rahe) --
+    # Galat spelling par CHUP-CHAP "all" par mat gir jao. "all" ka matlab
+    # poora paisa market mein, aur wo user ki marzi ke khilaaf ho sakta hai.
+    pf = cfg["portfolio"]
+    pf.setdefault("deploy_mode", "all")
+    pf.setdefault("deploy_pct", 1.0)
+    pf.setdefault("deploy_amount", 0)
+    dm = str(pf["deploy_mode"]).strip().lower()
+    if dm not in ("all", "pct", "percent", "percentage", "%",
+                  "amount", "amt", "rupees", "inr", "fixed"):
+        raise ConfigError(
+            f"deploy_mode '{pf['deploy_mode']}' samajh nahi aaya. "
+            f"Sirf all / pct / amount chalega.")
+    try:
+        dp = float(pf["deploy_pct"] or 0)
+        da = float(pf["deploy_amount"] or 0)
+    except (TypeError, ValueError):
+        raise ConfigError("deploy_pct / deploy_amount number hone chahiye.")
+    if dp < 0 or da < 0:
+        raise ConfigError("deploy_pct / deploy_amount negative nahi ho sakte.")
+    if dm in ("pct", "percent", "percentage", "%") and dp > 100:
+        raise ConfigError(
+            f"deploy_pct {dp} -- 100% se zyada nahi laga sakte. "
+            f"(0.60 ya 60 likho 60% ke liye.)")
+
+    if cfg["execution"]["order_type"] not in ("LIMIT", "MARKET"):
+        raise ConfigError("order_type sirf LIMIT ya MARKET ho sakta hai.")
+
+    # prices section optional hai -- purani config.yaml bhi chalti rahe
+    pr = cfg.setdefault("prices", {})
+    pr.setdefault("fallback", ["yahoo", "nse"])
+    pr.setdefault("stale_warn_min", 20)
+    if isinstance(pr["fallback"], str):
+        pr["fallback"] = [x.strip() for x in pr["fallback"].split(",") if x.strip()]
+
+    # config-relative paths, taaki kahin se bhi CLI chala sako
+    root = p.resolve().parent
+    for k, v in cfg["paths"].items():
+        cfg["paths"][k] = str((root / v).resolve())
+    cfg["_root"] = str(root)
+    return cfg
+
+
+def credentials(cfg: dict) -> tuple[str, str]:
+    cid = os.environ.get(cfg["dhan"]["client_id_env"], "")
+    tok = os.environ.get(cfg["dhan"]["access_token_env"], "")
+    if not cid or not tok:
+        raise ConfigError(
+            f"Environment variables set karo:\n"
+            f"  export {cfg['dhan']['client_id_env']}=...\n"
+            f"  export {cfg['dhan']['access_token_env']}=...")
+    return cid, tok

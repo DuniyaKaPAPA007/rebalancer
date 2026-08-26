@@ -1,0 +1,13 @@
+@echo off
+REM ====================================================================
+REM  Isko copy karke "creds.bat" banao aur apni details daalo.
+REM
+REM      copy creds.bat.example creds.bat
+REM
+REM  creds.bat .gitignore mein hai -- token kabhi commit nahi hoga.
+REM  Token Dhan web se: Profile -> DhanHQ Trading APIs -> Access Token
+REM  Token ki expiry hoti hai, expire hone par yahan naya daal dena.
+REM ====================================================================
+
+set DHAN_CLIENT_ID=your_client_id_here
+set DHAN_ACCESS_TOKEN=your_access_token_here

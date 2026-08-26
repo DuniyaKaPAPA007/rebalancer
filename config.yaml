@@ -1,0 +1,129 @@
+# ============================================================
+#  Weekly Equal-Weight Rebalancer  --  config
+#  Sab kuch yahin se control hota hai. Code chhoone ki zarurat nahi.
+# ============================================================
+
+dhan:
+  # Dhan web -> Profile -> DhanHQ Trading APIs se lo.
+  # Yahan mat likho -- environment variables use karo:
+  #   export DHAN_CLIENT_ID=...
+  #   export DHAN_ACCESS_TOKEN=...
+  client_id_env: DHAN_CLIENT_ID
+  access_token_env: DHAN_ACCESS_TOKEN
+  base_url: https://api.dhan.co/v2
+  exchange_segment: NSE_EQ
+  product_type: CNC          # delivery
+
+portfolio:
+  n_stocks: auto             # "auto" = jitne naam CSV mein hain (overflow slot chhod kar).
+                             # Ya seedha number likh do: 10, 25, 50 -- kuch bhi.
+  # Exit rule. n_stocks = strict top-10 (tumhara choice).
+  # Baad mein churn kam karni ho toh ise 13-15 kar dena -- code same rahega.
+  exit_rank_threshold: auto
+
+  # Watchlist mein n_stocks se KAM naam aayein toh kya karna hai?
+  #   full        -> jitne naam hain unhi mein poora paisa baant do
+  #                  (5 naam = 20% each, 1 naam = 100%). Hamesha invested.
+  #   fixed_slots -> hamesha NAV/n_stocks, baaki cash mein
+  #                  (Trendlyne backtest isi tarah chalta hai)
+  partial_list_mode: full
+
+  # ---- DEPLOY BUDGET -----------------------------------------------
+  # Poori capital market mein lagana zaroori nahi hai. Ye decide karta hai
+  # ki Dhan se aayi capital ka kitna hissa stocks mein jaayega.
+  #   all    -> poora (purana behaviour)
+  #   pct    -> deploy_pct hissa. 0.60 ya 60 -- dono 60% matlab.
+  #   amount -> deploy_amount rupees, NAV chahe kuch bhi ho.
+  # App ke Plan tab se bhi badal sakte ho -- wahan ka setting us session
+  # ke liye yahan wale ko override kar deta hai.
+  deploy_mode: all
+  deploy_pct: 1.0
+  deploy_amount: 0
+
+  # Safety cap: ek stock max itna % NAV. null = koi cap nahi.
+  # 'full' mode mein 1-2 naam wale hafte 50-100% concentration de dete hain.
+  # 0.25 set karoge toh ek stock kabhi 25% se upar nahi jaayega.
+  max_weight_per_stock_pct: null
+
+  # Watchlist ka rank kis hisaab se?
+  #   file_order        -> CSV mein jis order mein hai (Trendlyne ka Sl No)
+  #   "Momentum Score"  -> us column se descending sort
+  # NOTE: equal weight mein top-10 ke ANDAR ka order matter nahi karta.
+  # Ye sirf ye decide karta hai ki 11th (n+1) kaun banega, aur cash kam
+  # padne par kise pehle priority milegi.
+  rank_by: file_order
+
+  # Equal weight kitna strict. 0.0 = har hafte exact NAV/n pe laao.
+  # 0.20 rakho toh sirf +-20% drift pe hi trade hoga (kam churn, kam cost).
+  drift_band_pct: 0.0
+
+  # NAV ka kitna hissa cash mein chhodna hai (slippage/charges cushion).
+  cash_reserve_pct: 0.01     # 1%
+
+  # n+1 (11th) stock mein bacha hua paisa daalna hai?
+  use_overflow_slot: true
+
+costs:
+  # Dust orders rokne ke liye. In dono mein se jo BADA ho wo threshold hai.
+  min_trade_value_inr: 500
+  min_trade_pct_of_slice: 0.03    # slice ka 3%
+
+  # Cash planning ke liye estimate (STT + txn + stamp + GST).
+  est_sell_cost_pct: 0.0012
+  est_buy_cost_pct: 0.0004
+  dp_charge_per_scrip_inr: 14.75  # Rs 12.50 + 18% GST, har sell scrip par
+
+prices:
+  # Dhan ka Data API PAID hai. Wo na ho (ya fail ho) toh prices yahan se
+  # aayenge. Khaali list [] kar do toh koi fallback nahi -- sirf Dhan.
+  #   yahoo -> Yahoo Finance. Har jagah chalta hai, volume bhi deta hai,
+  #            par circuit limits NAHI deta.
+  #   nse   -> NSE ki apni site. Circuit limits BHI deti hai, par aksar
+  #            automated calls block kar deti hai.
+  fallback: [yahoo, nse]
+
+  # Fallback price itne minute se purana ho toh warning. Yahoo ke NSE
+  # prices aksar ~15 minute delayed hote hain.
+  stale_warn_min: 20
+
+execution:
+  order_type: LIMIT               # LIMIT | MARKET
+  limit_buffer_pct: 0.003         # BUY: ltp*(1+x), SELL: ltp*(1-x)
+  # Itni der tak fill na ho toh MARKET mein convert karo (0 = kabhi nahi)
+  market_fallback_after_sec: 300
+  fill_poll_interval_sec: 5
+  fill_wait_timeout_sec: 420
+  # SELL fills ke baad BUY phase se pehle itna rukna (funds release)
+  phase_gap_sec: 20
+
+  # Plan itne minute se purana ho toh asli execution ROK do. Plan ke
+  # LIMIT prices us waqt ke LTP se bane the -- purane plan par order
+  # bharta hi nahi. 0 = check band (recommend nahi karta).
+  max_plan_age_min: 15
+
+risk:
+  # Agar plan portfolio ka isse zyada ghuma raha hai -> ruk jao, poocho.
+  max_turnover_pct: 0.85
+  # Ek order kitne ka max
+  max_single_order_value_inr: 2000000
+  # In se kam quantity/price wale scrip skip
+  min_price_inr: 10
+  # Isse chhota market cap (Rs crore) -> warning. 0 = check off.
+  # Momentum screener aksar microcaps deta hai: chauda spread, circuit,
+  # ASM/GSM. Warning hai, blocker nahi.
+  min_market_cap_cr: 2000
+  # CSV ka LTP live se itna alag ho toh "list purani hai" warning
+  stale_ltp_tolerance: 0.05
+  # Circuit band isse chhota ho toh warning (surveillance/illiquid scrip)
+  narrow_band_warn_pct: 10.0
+  # Order aaj ke traded value ka isse bada hissa ho toh LIQUIDITY warning.
+  # Backtest mein impact cost hota hi nahi -- asli mein yahi sabse mehnga hai.
+  max_pct_of_traded_value: 0.01
+  # Market kis window mein rebalance ho (IST 24h)
+  allowed_window: ["09:45", "15:00"]
+
+paths:
+  watchlist: watchlist.csv
+  db: runs.db
+  plans_dir: plans
+  instruments_cache: .cache/scrip_master.csv
