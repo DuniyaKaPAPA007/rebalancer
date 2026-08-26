@@ -34,18 +34,37 @@ def _floor_qty(value: float, price: float) -> int:
         return 0
 
 
-def _limit_price(ltp: float, side: Side, buffer_pct: float) -> float:
+def _limit_price(ltp: float, side: Side, buffer_pct: float, circuit: CircuitInfo | None = None) -> float:
     """BUY thoda upar, SELL thoda neeche -- fill ki guarantee badhti hai
-    bina market order ke slippage ke."""
+    bina market order ke slippage ke. FIX: circuit ke andar clamp karo warna Dhan 400 deta hai."""
     try:
         if ltp is None or ltp != ltp or ltp <= 0 or math.isinf(ltp):
             return 0.0
         if buffer_pct != buffer_pct or math.isinf(buffer_pct) or buffer_pct < 0:
             buffer_pct = 0.0
         mult = (1 + buffer_pct) if side is Side.BUY else (1 - buffer_pct)
-        return round(ltp * mult, 2)          # NSE tick size = 0.05 for most,
-                                              # 0.01 allowed; 2 decimals safe hai
-    except (ValueError, OverflowError, TypeError):
+        px = round(ltp * mult, 2)          # NSE tick size = 0.05 for most,
+                                           # 0.01 allowed; 2 decimals safe hai
+        # FIX: clamp to circuit limits if available - prevents 400 Price outside circuit
+        if circuit and circuit.upper > 0 and circuit.lower > 0:
+            # keep 0.05 buffer from edge to avoid reject on exactly circuit
+            low = circuit.lower * 1.001
+            high = circuit.upper * 0.999
+            if px < low:
+                px = round(low, 2)
+            elif px > high:
+                px = round(high, 2)
+            # never cross ltp if at circuit - BUY at upper should be at upper, SELL at lower
+            # if at_upper, BUY must be exactly upper (no fill but valid), same for SELL lower
+            if circuit.at_upper and side is Side.BUY:
+                px = round(circuit.upper * 0.999, 2)
+            if circuit.at_lower and side is Side.SELL:
+                px = round(circuit.lower * 1.001, 2)
+        # tick size 0.05 rounding - Dhan expects multiples of 0.05 for most EQ
+        # round to nearest 0.05 to avoid 400 Tick size error
+        px = round(round(px / 0.05) * 0.05, 2)
+        return px
+    except (ValueError, OverflowError, TypeError, AttributeError):
         return 0.0
 
 
@@ -511,7 +530,7 @@ def build_plan(
             # still allow but warn - dust exit
             plan.warnings.append(f"{sym} EXIT Rs.{val:,.0f} bahut chhota, charges Rs.{est_cost_exit:,.0f} ~ {est_cost_exit/val*100:.0f}%")
         # validate limit_price not zero (stale ltp guard)
-        lp = _limit_price(ltp[sym], Side.SELL, buf)
+        lp = _limit_price(ltp[sym], Side.SELL, buf, circuit.get(sym) if circuit else None)
         if lp <= 0:
             plan.skipped.append(Skipped(sym, f"exit skip - LTP {ltp[sym]} se limit_price nahi bana"))
             continue
@@ -546,7 +565,7 @@ def build_plan(
         sells.append(PlannedOrder(
             symbol=sym, security_id=security_ids[sym], side=Side.SELL,
             qty=excess_qty, ref_price=ltp[sym], reason=Reason.TRIM,
-            limit_price=_limit_price(ltp[sym], Side.SELL, buf),
+            limit_price=_limit_price(ltp[sym], Side.SELL, buf, circuit.get(sym) if circuit else None),
             note=f"weight {cur_val/nav*100:.1f}% -> target {slice_value/nav*100:.1f}%"))
 
     sell_value = sum(o.value for o in sells)
@@ -602,7 +621,7 @@ def build_plan(
             if qty * ltp[sym] < min_trade:
                 plan.skipped.append(Skipped(sym, f"buy Rs.{qty*ltp[sym]:,.0f} < min trade Rs.{min_trade:,.0f} (scale {scale*100:.0f}%)"))
                 continue
-            lp = _limit_price(ltp[sym], Side.BUY, buf)
+            lp = _limit_price(ltp[sym], Side.BUY, buf, circuit.get(sym) if circuit else None)
             if lp <= 0:
                 plan.skipped.append(Skipped(sym, f"buy skip - LTP {ltp[sym]} invalid"))
                 continue
@@ -645,7 +664,7 @@ def build_plan(
         else:
             release_qty = 0
         if release_qty > 0:
-            lp = _limit_price(ltp[overflow], Side.SELL, buf)
+            lp = _limit_price(ltp[overflow], Side.SELL, buf, circuit.get(overflow) if circuit else None)
             if lp <= 0:
                 release_qty = 0
             else:
@@ -752,7 +771,7 @@ def build_plan(
                 symbol=overflow, security_id=security_ids[overflow],
                 side=Side.BUY, qty=delta, ref_price=ovp,
                 reason=Reason.OVERFLOW,
-                limit_price=_limit_price(ovp, Side.BUY, buf),
+                limit_price=_limit_price(ovp, Side.BUY, buf, circuit.get(overflow) if circuit else None),
                 note=f"bacha hua Rs.{min(leftover, ov_room):,.0f} n+1 mein"))
         elif delta < 0:
             # n+1 khud budget se bahar ja raha hai -> ghatana padega.
@@ -769,7 +788,7 @@ def build_plan(
                 sellable_left = max(0, ov_pos.sellable - ov_sold)
                 cut = min(-delta, sellable_left)
                 if cut > 0 and cut * ovp >= min_trade:
-                    lp2 = _limit_price(ovp, Side.SELL, buf)
+                    lp2 = _limit_price(ovp, Side.SELL, buf, circuit.get(overflow) if circuit else None)
                     if lp2 > 0:
                         sells.append(PlannedOrder(
                             symbol=overflow, security_id=security_ids[overflow],
@@ -877,7 +896,7 @@ def build_liquidation_plan(
     stuck = 0.0
     for sym, pos in sorted(held.items()):
         qty = pos.sellable
-        lp = _limit_price(ltp[sym], Side.SELL, buf)
+        lp = _limit_price(ltp[sym], Side.SELL, buf, circuit.get(sym) if circuit else None)
         if lp <= 0:
             plan.skipped.append(Skipped(sym, f"SAB BECHO skip - limit_price invalid LTP {ltp[sym]}"))
             stuck += pos.total_qty * ltp[sym]

@@ -42,6 +42,31 @@ class Executor:
         self.seg = cfg["dhan"]["exchange_segment"]
         self.prod = cfg["dhan"]["product_type"]
 
+    def _validate_order(self, o) -> str | None:
+        """Pre-flight check to give clear error before 400."""
+        if not o.security_id or str(o.security_id).strip() in ("", "0", "None"):
+            return f"securityId missing/0 for {o.symbol}"
+        try:
+            sid_int = int(str(o.security_id))
+            if sid_int <= 0:
+                return f"securityId invalid {o.security_id}"
+        except (ValueError, TypeError):
+            # Dhan allows string ids but should be numeric - warn but allow
+            pass
+        if o.qty <= 0:
+            return f"qty {o.qty} invalid"
+        if o.qty > 1000000:
+            return f"qty {o.qty} unreasonably large"
+        # price check
+        px = o.limit_price if o.limit_price and o.limit_price>0 else o.ref_price
+        if px is None or px <= 0 or px != px or getattr(px, "__class__", None) and str(px) == "nan":
+            return f"price invalid lim={o.limit_price} ref={o.ref_price}"
+        if px < 0.05 or px > 1000000:
+            return f"price {px} out of range"
+        # tick size 0.05 check - just warn
+        # if round(px/0.05)*0.05 != round(px,2): optionally fix
+        return None
+
     # ------------------------------------------------------------------
     def _check_age(self, plan: Plan) -> None:
         """Purana plan purane prices par bana hai.
@@ -193,6 +218,13 @@ class Executor:
                 placed.append({"order": o, "order_id": None, "cid": cid, "dry": True})
                 continue
 
+            # pre-validation to avoid 400
+            v = self._validate_order(o)
+            if v:
+                self.db.record_order(**base, status="FAILED", error=v)
+                result["failed"].append({"symbol": o.symbol, "side": o.side.value, "error": v})
+                log.error("%s %s pre-validate FAIL: %s", o.side.value, o.symbol, v)
+                continue
             try:
                 # guard 2: broker ki apni memory (DB corrupt/mit gaya ho toh)
                 resp = self.c.place_order(
@@ -205,12 +237,22 @@ class Executor:
                 self.db.record_order(**base, broker_order_id=oid,
                                      status=resp.get("orderStatus", "TRANSIT"))
                 placed.append({"order": o, "order_id": oid, "cid": cid})
-                log.info("%s %s x%d -> %s", o.side.value, o.symbol, o.qty, oid)
+                log.info("%s %s x%d @%.2f -> %s", o.side.value, o.symbol, o.qty, o.limit_price or o.ref_price, oid)
             except DhanError as e:
-                self.db.record_order(**base, status="FAILED", error=str(e))
+                # include full body for 400 diagnostics
+                full = str(e)
+                if getattr(e, "body", None):
+                    try:
+                        import json as _j
+                        body_str = _j.dumps(e.body) if isinstance(e.body, dict) else str(e.body)
+                    except:
+                        body_str = str(e.body)
+                    full = f"{e} | body: {body_str[:800]}"
+                self.db.record_order(**base, status="FAILED", error=full[:1000])
                 result["failed"].append({"symbol": o.symbol, "side": o.side.value,
-                                         "error": str(e)})
-                log.error("%s %s FAIL: %s", o.side.value, o.symbol, e)
+                                         "error": full[:800], "security_id": o.security_id,
+                                         "limit": o.limit_price, "ref": o.ref_price, "qty": o.qty})
+                log.error("%s %s FAIL: %s (sec=%s lim=%.2f ref=%.2f qty=%d)", o.side.value, o.symbol, full, o.security_id, o.limit_price or 0, o.ref_price, o.qty)
         return placed
 
     # ------------------------------------------------------------------
