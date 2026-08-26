@@ -640,13 +640,35 @@ def build_plan(
         cost = sum(o.value for o in out) * (1 + bc)
         return out, cost
 
-    budget = free_cash + net_proceeds
+    # ---- T+1 settlement logic ---------------------------------------
+    # CNC delivery = T+1. Agar settlement_T1 true hai toh SELL ka paisa aaj BUY me nahi jodega.
+    # Monthly rebalance: Last date ko SELL, 1st ko BUY.
+    is_T1 = bool(x_cfg.get("settlement_T1", False)) if isinstance(x_cfg, dict) else False
+    schedule = str(x_cfg.get("rebalance_schedule", "manual") or "manual").lower() if isinstance(x_cfg, dict) else "manual"
+    
+    if is_T1:
+        # Aaj ke BUY sirf free_cash se honge, SELL proceeds kal ayenge
+        budget = free_cash
+        # Agar SELL ho rahe hain toh bata do ki BUY adhure rahenge aur kal pure honge
+        if net_proceeds > 1:
+            plan.warnings.append(
+                f"T+1 SETTLEMENT (CNC): Aaj SELL se Rs.{net_proceeds:,.0f} milega par wo T+1 (kal) ko available hoga. "
+                f"Aaj ke BUY sirf free cash Rs.{free_cash:,.0f} se honge. Baaki BUY agle trading day (1st ko) honge. "
+                f"Isiliye aaj plan adhura dikhega — ye sach wala rebalance hai, turant wala nahi."
+            )
+            if schedule == "monthly_eom":
+                plan.warnings.append(
+                    f"MONTHLY REBALANCE: Last trading day (aaj) sirf SELL honge, BUY kal (1st trading day) honge jab T+1 paisa settle hoga."
+                )
+    else:
+        budget = free_cash + net_proceeds
     buys, demand = size_buys(1.0)
 
     # 4a. paisa kam pad raha hai -> pehle overflow holding ko bhuna lo
     #     (11th slot ki priority top-10 se kam hai)
+    # T+1 me overflow bech ke aaj BUY fund nahi karte - T+1 me paisa ayega kal
     ov_pos = held.get(overflow) if overflow else None
-    if demand > budget and ov_pos and ov_pos.sellable > 0:
+    if demand > budget and ov_pos and ov_pos.sellable > 0 and not is_T1:
         need = demand - budget
         # precise need: net proceeds = qty*price*(1 - sell_cost) - dp
         # solve qty = ceil((need + dp)/(price*(1-cost)))

@@ -101,6 +101,19 @@ execution:
   # bharta hi nahi. 0 = check band (recommend nahi karta).
   max_plan_age_min: 15
 
+  # ---- T+1 SETTLEMENT (CNC delivery) ---------------------------------
+  # Dhan me CNC = T+1 settlement. Matlab aaj becha toh paisa kal (T+1) ko
+  # available hoga, aaj nahi. Agar isko false rakho (intraday/sam same day)
+  # toh planner SELL ka paisa turant BUY me jod dega (purana behaviour).
+  # true = sach wala: BUY sirf free_cash se, SELL ka paisa agle din.
+  # Monthly rebalance (last date SELL, 1st ko BUY) ke liye true rakho.
+  settlement_T1: true
+
+  # Monthly kaunsa din rebalance karna hai (IST)
+  #   last_trading_day -> mahine ka aakhri trading din SELL phase
+  #   first_trading_day -> agle mahine ka pehla din BUY phase
+  rebalance_schedule: monthly_eom   # weekly | monthly_eom | manual
+
 risk:
   # Agar plan portfolio ka isse zyada ghuma raha hai -> ruk jao, poocho.
   max_turnover_pct: 0.85

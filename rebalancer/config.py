@@ -103,6 +103,27 @@ def load(path: str | Path = "config.yaml") -> dict[str, Any]:
 
     if cfg["execution"]["order_type"] not in ("LIMIT", "MARKET"):
         raise ConfigError("order_type sirf LIMIT ya MARKET ho sakta hai.")
+    # defaults for T+1 settlement (new)
+    cfg["execution"].setdefault("settlement_T1", True)
+    cfg["execution"].setdefault("rebalance_schedule", "monthly_eom")
+    # validate settlement_T1 is bool
+    st = cfg["execution"]["settlement_T1"]
+    if not isinstance(st, bool):
+        # allow 0/1/"true"/"false"
+        if isinstance(st, str):
+            low = st.strip().lower()
+            if low in ("true","1","yes","y","on"):
+                cfg["execution"]["settlement_T1"] = True
+            elif low in ("false","0","no","n","off"):
+                cfg["execution"]["settlement_T1"] = False
+            else:
+                raise ConfigError("execution.settlement_T1 true/false hona chahiye")
+        elif isinstance(st, int):
+            cfg["execution"]["settlement_T1"] = bool(st)
+        else:
+            raise ConfigError("execution.settlement_T1 true/false hona chahiye")
+    if cfg["execution"]["rebalance_schedule"] not in ("weekly","monthly_eom","manual","monthly","daily"):
+        raise ConfigError("execution.rebalance_schedule weekly/monthly_eom/manual me se ek hona chahiye")
     # validate execution numeric params
     for k in ("limit_buffer_pct", "market_fallback_after_sec", "fill_poll_interval_sec", "fill_wait_timeout_sec", "phase_gap_sec", "max_plan_age_min"):
         if k in cfg["execution"]:

@@ -118,21 +118,38 @@ class Executor:
 
         # ---------- PHASE 1: SELL ---------------------------------------
         sells = plan.sells
+        is_T1 = bool(self.cfg.get("execution", {}).get("settlement_T1", False))
         if sells:
-            log.info("PHASE 1 -- %d SELL orders", len(sells))
+            log.info("PHASE 1 -- %d SELL orders (T+1=%s)", len(sells), is_T1)
             result["sells"] = self._place_batch(plan.run_id, sells, result)
             self._await_fills(plan.run_id, result["sells"])
 
-            gap = int(self.x["phase_gap_sec"])
+            gap = int(self.x.get("phase_gap_sec", 20) or 20)
             if gap and not self.dry:
                 log.info("Funds release hone ke liye %ds ruk rahe hain...", gap)
                 time.sleep(gap)
+            if is_T1 and not self.dry and sells:
+                # T+1 mode: SELL ke baad paisa kal ayega, aaj BUY nahi karna (sirf LIVE me)
+                # Dry run me dono dikhao taaki user ko pata chale kya hoga
+                if plan.buys:
+                    log.warning("T+1 MODE: SELL ho gaye, BUY kal (T+1) honge jab paisa settle hoga. Aaj BUY skip kar rahe hain (LIVE only).")
+                    result["t1_pending_buys"] = len(plan.buys)
+                    result["t1_note"] = "BUY orders T+1 pe pending hain. Kal naya plan banao ya isi plan ke BUY kal execute karo."
+                    # mark partially done, not fully DONE
+                    self.db.set_status(plan.run_id, "AWAITING_T1_BUY", f"{len(plan.buys)} BUY T+1 pending")
+                    result["reconciliation"] = self.reconcile(plan)
+                    return result
 
         # ---------- PHASE 2: BUY ----------------------------------------
+        # T+1 me yahan tabhi ayenge jab sells nahi the, ya manual same-day mode hai
         buys = plan.buys
         if buys:
             # Cash dobara check karo -- sell partial fill hua ho sakta hai,
             # ya price hil gaya ho. Plan ke bharose andha buy mat karo.
+            # T+1 mode me buys sirf free_cash se fit honge (planner ne already limit kiya hai)
+            if is_T1 and sells:
+                # ye branch tabhi ayega jab sells not present (pure buy) ya dry
+                pass
             buys = self._fit_to_available_cash(buys, plan)
             log.info("PHASE 2 -- %d BUY orders", len(buys))
             result["buys"] = self._place_batch(plan.run_id, buys, result)
