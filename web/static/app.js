@@ -456,9 +456,10 @@ function renderPlan() {
 
   const LBL = { EXIT:"OUT", ENTRY:"NEW", TOPUP:"ADD", TRIM:"TRIM",
                 OVERFLOW:"n+1", OVERFLOW_TRIM:"n+1 trim" };
-  const rowsFor = list => list.length ? list.map(o => {
+  const rowsFor = list => list.length ? list.map((o, idx) => {
     const r = o.reason;
     return `<tr>
+      <td class="num">${idx+1}</td>
       <td class="l"><span class="tag ${r}">${LBL[r] || r}</span></td>
       <td class="l sym">${esc(o.symbol)}</td>
       <td class="num">${o.qty.toLocaleString("en-IN")}</td>
@@ -466,10 +467,10 @@ function renderPlan() {
       <td class="num">${o.limit_price ? inr(o.limit_price, 2) : "MKT"}</td>
       <td class="num"><b>${inr(o.value)}</b></td>
       <td class="l muted">${esc(o.note)}</td></tr>`;
-  }).join("") : `<tr><td colspan="7" class="l muted" style="padding:18px 10px">Kuch nahi.</td></tr>`;
+  }).join("") : `<tr><td colspan="8" class="l muted" style="padding:18px 10px">Kuch nahi.</td></tr>`;
 
-  const head = `<thead><tr><th class="l">Kya</th><th class="l">Symbol</th><th>Qty</th><th>Price</th><th>Limit</th><th>Value</th><th class="l">Kyun</th></tr></thead>`;
-  const foot = (n, v) => n ? `<tfoot><tr><td colspan="5" class="l">${n} orders</td><td class="num">${inr(v)}</td><td></td></tr></tfoot>` : "";
+  const head = `<thead><tr><th>S.No</th><th class="l">Kya</th><th class="l">Symbol</th><th>Qty</th><th>Price</th><th>Limit</th><th>Value</th><th class="l">Kyun</th></tr></thead>`;
+  const foot = (n, v) => n ? `<tfoot><tr><td colspan="6" class="l">${n} orders</td><td class="num">${inr(v)}</td><td></td></tr></tfoot>` : "";
 
   $("#sellTable").innerHTML = head + `<tbody>${rowsFor(sells)}</tbody>` + foot(sells.length, sv);
   $("#buyTable").innerHTML = head + `<tbody>${rowsFor(buys)}</tbody>` + foot(buys.length, bv);
@@ -483,6 +484,24 @@ function renderPlan() {
     $("#planBanners").innerHTML += banner("good", "✓",
       `<b>${untouched.length} stock bilkul chhue hi nahi ja rahe</b> — nayi list mein hain aur weight already sahi hai, toh koi order nahi: <b>${untouched.map(esc).join(", ")}</b>`);
   $("#buySub").innerHTML = `<b>${buys.filter(o => o.reason === "ENTRY").length}</b> nayi entry · <b>${buys.filter(o => o.reason === "TOPUP").length}</b> top-up · <b>${buys.filter(o => o.reason.startsWith("OVERFLOW")).length}</b> n+1 slot`;
+  // Allocation mismatch warning + S.No already shows count
+  const wantSlots = p.slots || 0;
+  const gotBuys = buys.length;
+  const skipped = p.skipped || [];
+  // warn if fewer buys than slots (excluding holds that are within band)
+  // count targets that should have buys but don't
+  if (wantSlots > 0 && gotBuys < wantSlots) {
+    const miss = wantSlots - gotBuys;
+    const reason = skipped.length ? ` Skipped: ${skipped.slice(0,5).map(s=>`${esc(s.symbol)} (${esc(s.reason.slice(0,60))})`).join(', ')}${skipped.length>5?'...':''}` : '';
+    $("#planBanners").innerHTML += banner("warn", "!",
+      `<b>Allocation adhura:</b> ${wantSlots} stocks me baantna tha, par sirf <b>${gotBuys}</b> me buy order bana (${miss} stocks me paisa nahi laga).`+
+      `<br><span class="muted">Wajah: ${miss} stocks ka qty min_trade (₹${(p.costs && p.costs.min_trade) || 500}) se kam ya price/circuit issue. ${reason}</span>`+
+      `<br><span class="muted">S.No column se dekho kaunse chhute. Agar cash kam hai toh deploy % badhao ya capital badhao.</span>`);
+  }
+  if (skipped.length) {
+    $("#planBanners").innerHTML += banner("info", "i",
+      `<b>${skipped.length} skipped</b> — ye orders isliye nahi bane:<ul>${skipped.map(s=>`<li><b>${esc(s.symbol)}</b>: ${esc(s.reason)}</li>`).join('')}</ul>`);
+  }
 
   const c = p.costs || {};
   const money = v => inr(v || 0);

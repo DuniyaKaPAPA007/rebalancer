@@ -64,16 +64,40 @@ class Store:
         self.path = str(path)
         with self._conn() as c:
             c.executescript(SCHEMA)
+            # enable WAL for better concurrency
+            try:
+                c.execute("PRAGMA journal_mode=WAL;")
+                c.execute("PRAGMA synchronous=NORMAL;")
+                c.execute("PRAGMA busy_timeout=30000;")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_runs_created ON runs(created_at);")
+            except Exception:
+                pass
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30)
+        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("PRAGMA busy_timeout=30000;")
             yield conn
-            conn.commit()
+            try:
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # ---- runs ---------------------------------------------------------
     def save_run(self, run_id: str, created_at: str, status: str,
@@ -112,9 +136,27 @@ class Store:
             return dict(r) if r else None
 
     def record_order(self, **kw: Any) -> None:
+        # sanitize cols - only allow known columns to avoid injection
+        allowed = {"run_id", "correlation_id", "broker_order_id", "symbol", "security_id",
+                   "side", "reason", "planned_qty", "filled_qty", "limit_price", "avg_fill_price",
+                   "status", "placed_at", "updated_at", "error"}
+        kw = {k: v for k, v in kw.items() if k in allowed}
+        if not kw:
+            return
         cols = ", ".join(kw)
         marks = ", ".join("?" * len(kw))
-        upd = ", ".join(f"{k}=excluded.{k}" for k in kw if k != "correlation_id")
+        # don't overwrite run_id on conflict, also protect filled_qty from going backwards
+        # Use max for filled_qty via CASE, but simple: only update if new filled > old
+        # For now exclude run_id from update to preserve first association
+        upd_parts = []
+        for k in kw:
+            if k in ("correlation_id", "run_id"):
+                continue
+            if k == "filled_qty":
+                upd_parts.append(f"{k}=MAX(COALESCE({k},0), excluded.{k})")
+            else:
+                upd_parts.append(f"{k}=excluded.{k}")
+        upd = ", ".join(upd_parts) if upd_parts else "updated_at=excluded.updated_at"
         with self._conn() as c:
             c.execute(f"INSERT INTO orders ({cols}) VALUES ({marks})"
                       f" ON CONFLICT(correlation_id) DO UPDATE SET {upd}",

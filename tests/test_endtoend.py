@@ -138,10 +138,10 @@ def test_report_renders_without_error(cfg):
         assert section in text, section
 
 
-def test_plan_json_roundtrip(cfg):
+def test_plan_json_roundtrip(cfg, tmp_path):
     plan = _make_plan(cfg, holdings=[Position("OLDNAME", "sec-OLDNAME", 100, 100)])
     js = plan_to_json(plan)
-    p = Path("/tmp/RTEST.json")
+    p = tmp_path / "RTEST.json"
     p.write_text(js)
     back = _plan_from_json(p)
 

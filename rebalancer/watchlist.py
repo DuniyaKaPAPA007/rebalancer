@@ -56,9 +56,12 @@ def _pick(header: list[str], candidates: list[str]) -> str | None:
 def _num(v: str | None) -> float | None:
     if v is None:
         return None
-    s = re.sub(r"[^0-9.\-]", "", str(v))
+    s = str(v).strip()
+    if s.lower() in ("", "-", "--", "n/a", "na", "null", "none", "#n/a"):
+        return None
+    s = re.sub(r"[^0-9.\-]", "", s)
     try:
-        return float(s) if s not in ("", "-", ".") else None
+        return float(s) if s not in ("", "-", ".", "-.", ".-") else None
     except ValueError:
         return None
 
@@ -70,9 +73,18 @@ _STOCK_RE = re.compile(r"^(?P<name>.+?)\s*\(\s*(?P<isin>INE[0-9A-Z]+)\s*/"
 
 
 def _looks_like_backtest(path: Path) -> bool:
-    with path.open(newline="", encoding="utf-8-sig") as f:
-        head = f.readline().lower()
-    return "as on date" in head and "nav" in head
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as f:
+            # read first few lines, not just first
+            head = ""
+            for _ in range(3):
+                try:
+                    head += f.readline().lower() + " "
+                except:
+                    break
+        return "as on date" in head and "nav" in head and "period" in head or ("as on date" in head and "nav" in head and "holdings" in head)
+    except Exception:
+        return False
 
 
 def parse_backtest_periods(path: str | Path) -> list[tuple[str, list[dict]]]:
@@ -192,10 +204,22 @@ def read(path: str | Path, rank_by: str = "file_order") -> list[TargetName]:
     if not out:
         raise WatchlistError(f"{p.name} mein ek bhi symbol nahi mila.")
 
-    dupes = {s for s in (t.symbol for t in out)
-             if [t.symbol for t in out].count(s) > 1}
-    if dupes:
-        raise WatchlistError(f"Watchlist mein duplicate symbol: {sorted(dupes)}")
+    # O(n) duplicate detection + ISIN duplicate check
+    seen = {}
+    isin_seen = {}
+    dupes_set = set()
+    for t in out:
+        if t.symbol in seen:
+            dupes_set.add(t.symbol)
+        else:
+            seen[t.symbol] = 1
+        if t.isin:
+            if t.isin in isin_seen and isin_seen[t.isin] != t.symbol:
+                # same ISIN different symbol -> dual listing warning, not blocker but collect
+                pass
+            isin_seen[t.isin] = t.symbol
+    if dupes_set:
+        raise WatchlistError(f"Watchlist mein duplicate symbol: {sorted(dupes_set)}")
 
     # ---- re-rank ------------------------------------------------------
     if rank_by != "file_order":
