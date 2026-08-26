@@ -163,8 +163,24 @@ class DhanClient:
             if r.status_code >= 400:
                 # 4xx = hamari galti. Retry karne ka koi matlab nahi,
                 # aur order APIs par retry DUPLICATE ORDER bana sakta hai.
+                body = _safe_json(r)
+                # Special handling for DH-905 Invalid IP - give actionable message
+                try:
+                    b_str = str(body)
+                    if "DH-905" in b_str or "Invalid IP" in b_str:
+                        msg = (
+                            "Dhan DH-905: Invalid IP - Tumhara IP Dhan me whitelist nahi hai. "
+                            "Dhan web -> Profile -> DhanHQ Trading APIs -> Whitelist IP me "
+                            "jaake apna public IP add karo (https://ifconfig.me pe dekho). "
+                            "Ya 0.0.0.0 allow karo. Order API IP-check karta hai, data API nahi."
+                        )
+                        raise DhanError(msg, r.status_code, body)
+                except DhanError:
+                    raise
+                except:
+                    pass
                 raise DhanError(f"{method} {path} -> {r.status_code}",
-                                r.status_code, _safe_json(r))
+                                r.status_code, body)
             if not r.content:
                 return None
             return _safe_json(r)
