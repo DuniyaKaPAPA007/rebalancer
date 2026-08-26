@@ -1,0 +1,176 @@
+================================================================================
+ Weekly Equal-Weight Rebalancer — Kaise Kaam Karti Hai (TXT VERSION)
+================================================================================
+One line: Trendlyne screener se watchlist.csv leke har rebalance pe portfolio
+ko equal-weight (NAV / n) pe wapas lana — DhanHQ v2 se live, T+1 settlement
+ke saath, bina wash-trade ke.
+
+--------------------------------------------------------------------------------
+1. OVERVIEW
+--------------------------------------------------------------------------------
+Purpose: Momentum/Golden-Cross jaise screener ke top-10 me har period equal
+paisa lagana. Har rebalance pe jo bahar ho gaya EXIT, jo naya ENTRY, jo reh
+gaya TRIM/TOPUP se exact weight pe.
+
+Interface:
+  Web: START-APP.bat -> http://127.0.0.1:8770 (Connect -> Watchlist -> Plan -> Execute)
+  CLI: python -m rebalancer.cli plan -> execute --approve
+Modes: paper (nakli 1cr, koi order nahi) vs live (Dhan credentials, haan/sab bech do)
+Source of truth: Dhan holdings API. runs.db sirf audit.
+
+--------------------------------------------------------------------------------
+2. END-TO-END FLOW (Monthly EOM + T+1)
+--------------------------------------------------------------------------------
+Trendlyne CSV (25 rows)
+ -> watchlist.py (SIMPLE/SCREENER/BACKTEST auto-detect)
+ -> instruments.py (symbol/ISIN -> securityId via .cache/scrip_master.csv)
+ -> Dhan API (holdings + fundlimit + marketfeed/quote + fallback yahoo/nse)
+ -> planner.py:build_plan() [PURE: (holdings, ltp, watchlist, config) -> Plan]
+ -> report.py (human text + cost)
+ -> executor.py (SELL -> T+1 settle -> BUY)
+ -> store.py (SQLite runs.db + plans/*.json)
+
+Monthly kalender (settlement_T1: true):
+  31st (SELL Day):
+    - free_cash = Dhan se (50k)
+    - SELL: OLD list se bahar + TRIM (overweight)
+    - BUY is din sirf free_cash se, SELL ke 2L kal ayenge
+      Warning: T+1 SETTLEMENT: Aaj BUY sirf free_cash se
+    - Executor LIVE pe sirf SELL bhejta, BUY ko AWAITING_T1_BUY pe rokta (dry me dono preview)
+  1st (BUY Day):
+    - free_cash = 50k + sell settled 2L = 2.5L
+    - Wahi watchlist se naya plan -> BUY (ENTRY/TOPUP) pure paise se
+    - Executor ab BUY bhejta
+
+settlement_T1:false (intraday) -> budget = free_cash + sell_proceeds same day (CNC ke liye galat).
+
+--------------------------------------------------------------------------------
+3. CORE LOGIC — planner.py (Pure Diff Engine)
+--------------------------------------------------------------------------------
+NAV = sum(holdings_qty * LTP) + free_cash
+
+1. n = resolve_n(list_len) : n_stocks:auto = len-1 agar overflow on
+   exit_rank_threshold:auto = n (strict top-n)
+2. slice = investable / slots
+   investable = target_equity - parked_keep_zone_value
+   target_equity = min( NAV*(1-cash_reserve), deploy_budget )
+   deploy_budget: all=NAV, pct=NAV*pct (0.6 ya 60 dono 60%), amount=fixed
+3. slots = len(targets) if partial_list_mode:full (4 naam ->25% each) else n
+4. SELL:
+   EXIT: keep_zone aur overflow ke bahar -> sellable = min(total, available)
+   TRIM: overweight aur drift=(cur-slice)/slice > band -> excess_qty=floor((cur-slice)/price) agar >min_trade (max(500, slice*3%)) warna Skipped
+5. net_proceeds = sell_value*(1 - est_sell_cost) - DP*len(sells) (floor 0 if dust)
+6. BUY: size_buys(scale)
+   eff_slice = slice*scale, held_qty = total - trimmed
+   drift >= -band aur held>0 -> skip (band ke andar)
+   qty = floor(eff_slice - cur_val)/price agar >=min_trade
+   Limit clamp circuit ke andar + tick 0.05
+7. Cash shortage:
+   budget = free_cash (T1) ya free_cash+proceeds (same-day)
+   Pehle overflow (11th) bech ke fund (ceil exact, +1 overshoot fix), phir pro-rata scale *= budget/demand*0.9995 15 iter, best feasible rakho (pura discard nahi)
+8. Overflow n+1: ov_room = investable - tgt_val_after (up to cap), held_val ka buy-cost nahi, need = target-held, buy_qty = floor(need / price*(1+cost))
+9. _net_opposing: same symbol BUY 500+SELL200 -> net BUY 300 ek order, dust net BUY <min_trade skip, net SELL warn
+10. Warnings: allocation adhura (buys < slots + skipped + S.No), concentration >25% -> cap, pricest slice <15 shares, stale LTP >5%, microcap <2000cr, narrow band <=10%, liquidity >1% traded_value
+
+Risk gates (penny pehle, phir cap):
+  max_single_order 20L -> BLOCKED + suggest
+  min_price 10 -> BUY skip only, SELL never
+  max_turnover 85% churn (sell/NAV) pe, first deploy churn 0 -> pass
+  qty==0 / limit invalid -> BLOCKED
+
+Liquidation: watchlist ignore, sab SELL sellable tak, securityId+ltp both check.
+
+--------------------------------------------------------------------------------
+4. PRICE & CIRCUIT
+--------------------------------------------------------------------------------
+Primary: Dhan marketfeed/quote (1 req/s, chunk 500) -> CircuitInfo {ltp, upper, lower, prev_close, volume}
+Fallback: fetch([yahoo,nse]) — yahoo per-thread Session (thread-safe), age>15m stale drop, NSE circuit enrich yahoo (has_circuit merge), upperCP/lowerCP ko intraHigh/Low se fallback nahi (false circuit fix).
+Circuit use: at_upper = ltp >= upper*0.998 (0.2% tight), band = (upper-base)/base where base=prev_close (prev 0 -> None), liquidity o.value / traded_value.
+
+--------------------------------------------------------------------------------
+5. DHAN CLIENT
+--------------------------------------------------------------------------------
+Buckets: order 8/s (<10), data 4/s (<5), quote 0.9/s (<1), other 15/s
+wait lock hold nahi (sleep bina reserve)
+429 -> Retry-After + jitter, 500 -> DhanNoData only for /holdings with no data + holding/position keyword (HTML empty swallow nahi)
+Session + _req_lock (thread-safe), chunk partial continue (ek fail pe next try, pehle return)
+place_order guard: find_order_by_correlation (GET /orders/external/{cid}) + cid hash (30 chars, sha1 6char suffix, truncate collision fix) + retries=1
+DH-905 Invalid IP -> Hindi whitelist message (Dhan Profile -> Static IP + regenerate token, 7 day lock, SEBI 1 Apr 2026 mandatory, 0.0.0.0 nahi chalta)
+
+--------------------------------------------------------------------------------
+6. EXECUTOR
+--------------------------------------------------------------------------------
+Age check BEFORE EXECUTING + TIMEOUT 30s WAL
+SELL -> gap 20s -> BUY (T1 LIVE me SELL ke baad BUY skip + AWAITING_T1_BUY, dry me dono preview)
+_fit_to_available_cash: limit_price se need (pehle ref_price kam), copy not mutate, affordable remaining/eff_price ke baad next cheaper buys try (pehle break)
+_await_fills: poll after check (pehle sleep pehle), TERMINAL_OK = TRADED,COMPLETE,FILLED etc, filledQty multi-key, avg price multi-key, modify_to_market total qty try phir remaining, converted ko cancel nahi, _validate_order pre-flight (securityId>0, qty>0, price>0, tick)
+reconcile: holdings avg_price fallback if ltp 0, nav + cash, drift vs slice.
+S.No: sell/buy tables me 1,2,3
+
+--------------------------------------------------------------------------------
+7. WEB (FastAPI 127.0.0.1:8770)
+--------------------------------------------------------------------------------
+STATE + RLock (pehle global dict race), _cfg snapshot, _client double-checked, upload -> mkstemp unique (pehle fixed rebal_upload.csv), streaming limit 5MB, sanitize filename, error sanitized
+autodetect monotonic + lock, creds_broken sanitized, latch reset on creds/verify success
+mode, slots, deploy, creds/clear sab STATE_LOCK + plan=None
+deploy preview NAV via same price path as plan
+Report S.No + web app.js S.No | Kya | Symbol | Qty | Price | Limit | Value | Kyun, allocation mismatch banner (wantSlots vs gotBuys + skipped) + skipped banner
+
+--------------------------------------------------------------------------------
+8. STORE, INSTRUMENTS, WATCHLIST, CONFIG
+--------------------------------------------------------------------------------
+Store: PRAGMA WAL, busy_timeout 30s, _conn rollback/commit safe, record_order allowed cols + MAX(filled_qty), save_run ON CONFLICT only status/plan_json
+Instruments: _download atomic tmp+replace + stale fallback if fail, segment E/EQUITY/NSE_EQ, instrument EQUITY/ES/EQ, series EQ only (BE/BZ reject)
+Watchlist: _looks_like_backtest 3 lines as on date+nav+period/holdings, _num N/A/--/null -> None, duplicate O(n) via set + ISIN check, _pick substring fallback
+Config: n_stocks "10.0" -> float->int, cash_reserve 0-0.5, deploy_mode typo guard, execution numeric 0-0.1, prices fallback yahoo/nse only, risk allowed_window HH:MM, 1MB size bomb, settlement_T1 bool + rebalance_schedule enum
+PaperClient RLock, seed_from backtest period se holdings seed
+
+--------------------------------------------------------------------------------
+9. BACKTEST vs LIVE
+--------------------------------------------------------------------------------
+Planner pure — backtest me wahi code live me. backtest_realistic/*.csv 8 months (Aug-Mar) se walk-forward: Aug normal -> Sep high churn 60% -> Oct partial 4 -> Nov microcap -> Dec circuit -> Jan low cash -> Feb rename ISIN -> Mar, store.db nahi, holdings T+1 se update, NAV 79L-1Cr stable, no wash, no oversell.
+Costs: estimate_costs STT 0.1% both, txn 0.00307%, stamp 0.015% buy, SEBI 0.0001%, GST 18%, DP 14.75/scrip. annualised_cost = one_time*52 -> pct_of_nav
+Paper RLock, seed_from backtest period se holdings seed
+
+--------------------------------------------------------------------------------
+10. CONFIG QUICK REF
+--------------------------------------------------------------------------------
+portfolio:
+  n_stocks        auto / 10              auto = list len - overflow
+  partial_list_mode full                  fixed_slots = NAV/n cash drag
+  deploy_mode/pct/amount  pct 60           T1 me next day settle
+  max_weight_per_stock_pct 0.25            null = no cap
+  settlement_T1   true                    CNC ke liye true
+  rebalance_schedule monthly_eom           weekly/monthly/manual
+execution:
+  order_type      LIMIT                   limit_buffer 0.3%
+  phase_gap_sec   20                      T1 me buys kal
+prices:
+  fallback        [yahoo,nse]             stale_warn 20m
+risk:
+  max_turnover    0.85                    churn gate
+  min_price       10                      penny guard
+  DH-905          whitelist               Dhan Profile -> Static IP + regenerate token, 7 day lock
+  0.0.0.0 nahi chalta SEBI 1 Apr 2026 se
+
+--------------------------------------------------------------------------------
+11. VERIFICATION (Bug-Proof)
+--------------------------------------------------------------------------------
+87 pytest: test_planner 34 + test_endtoend 19 + test_hardening 22 + test_t1 11 = 76->87 passed
+1000 fuzz: 500 T1 true + 500 false random holdings/prices/NaN/inf/duplicate/circuit — no crash, no wash, no oversell, CID unique
+8-month realistic backtest: high churn, partial, microcap, circuit, low cash, ISIN rename — warnings + S.No + T+1 split correct, NAV stable
+
+--------------------------------------------------------------------------------
+12. HOW TO RUN
+--------------------------------------------------------------------------------
+1. 1-SETUP.bat  # pip install -r requirements.txt
+2. creds.bat  # set DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN (web Profile -> DhanHQ APIs)
+3. Whitelist IP (mandatory 1 Apr 2026): web.dhan.co -> Profile -> Static IP -> Primary/Secondary -> regenerate token
+4. START-APP.bat  # http://127.0.0.1:8770
+   Flow: Connect -> Watchlist CSV drop -> (Deploy slider) -> Plan Banao (S.No table) -> Execute rehearsal -> haan -> LIVE (EOM SELL, next day BUY if T1)
+   CLI: python -m rebalancer.cli plan; python -m rebalancer.cli execute --approve
+plans/*.json + runs.db me audit, .gitignore me creds.bat, runs.db, plans/, .cache/.
+
+================================================================================
+END
+================================================================================
