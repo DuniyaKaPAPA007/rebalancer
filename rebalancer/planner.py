@@ -819,6 +819,44 @@ def build_plan(
 
     plan.orders = _net_opposing(sells + buys, min_trade, plan)
 
+    # ---- allocation completeness check ---------------------------------
+    # If fewer BUYs than requested slots, warn explicitly with S.No context
+    try:
+        buys_after = [o for o in plan.orders if o.side is Side.BUY]
+        # targets that are not covered by any order (neither buy nor hold-within-band)
+        # Hold-within-band: held and drift within band => no order needed, not a miss
+        # Missed = target symbol not in any order and not held-within-band and not skipped
+        if slots > 0 and len(buys_after) < slots:
+            # Check if skipped explains it
+            skipped_syms = {s.symbol for s in plan.skipped if s.symbol in targets}
+            # Also check held-within-band (no order but held correctly)
+            # For now warn if skipped explains most misses
+            if skipped_syms or len(buys_after) < len(targets):
+                miss = slots - len(buys_after)
+                # only warn if miss due to skipped/cash, not due to already correct holdings
+                # Count holds that are within band (no order needed) - estimate
+                holds_ok = 0
+                for sym in targets:
+                    pos = held.get(sym)
+                    if pos and sym not in {o.symbol for o in plan.orders} and sym not in skipped_syms:
+                        cur = pos.total_qty * ltp[sym]
+                        drift = abs(cur - slice_value) / slice_value if slice_value>0 else 0
+                        if drift <= band:
+                            holds_ok += 1
+                real_miss = miss - 0  # holds_ok are not miss, but our miss includes them? Let's compute
+                # Effective expected buys = targets - holds_ok
+                eff_expected = len(targets) - holds_ok
+                if len(buys_after) < eff_expected:
+                    skipped_list = ", ".join(sorted(skipped_syms)[:5]) + ("..." if len(skipped_syms)>5 else "")
+                    plan.warnings.append(
+                        f"Allocation adhura: {len(targets)} targets me se sirf {len(buys_after)} pe BUY bana ({eff_expected - len(buys_after)} miss). "
+                        f"Skipped: {skipped_list if skipped_list else 'cash/min_trade/circuit'}. "
+                        f"S.No column se dekho kaunse chhute. Cash badhao ya min_trade kam karo."
+                    )
+    except Exception as e:
+        # never fail plan due to warning logic
+        pass
+
     # ---- 6. risk gates -------------------------------------------------
     hint = ""
     if target_equity < reserve_cap - 1:

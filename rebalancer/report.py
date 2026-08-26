@@ -58,12 +58,12 @@ def render(plan: Plan, cfg: Mapping) -> str:
         if not orders:
             return
         L.append(f"  {title}")
-        L.append(f"  {'':4} {'SYMBOL':<14}{'QTY':>7} {'PRICE':>10} {'VALUE':>13}   NOTE")
+        L.append(f"  {'S.NO':>4} {'':4} {'SYMBOL':<14}{'QTY':>7} {'PRICE':>10} {'VALUE':>13}   NOTE")
         L.append("  " + "-" * (w - 4))
-        for o in orders:
-            L.append(f"  {_ARROW[o.reason]} {o.symbol:<14}{o.qty:>7} "
+        for idx, o in enumerate(orders, 1):
+            L.append(f"  {idx:>4} {_ARROW[o.reason]} {o.symbol:<14}{o.qty:>7} "
                      f"{o.ref_price:>10,.2f} {_inr(o.value):>13}   {o.note}")
-        L.append(f"  {'':4} {'':<14}{'':>7} {'TOTAL':>10} {_inr(total):>13}")
+        L.append(f"  {'':4} {'':4} {'':<14}{'':>7} {'TOTAL':>10} {_inr(total):>13}")
         L.append("")
 
     table(f"SELL  ({len(plan.sells)} orders)", plan.sells, plan.sell_value)
