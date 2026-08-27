@@ -884,6 +884,111 @@ async function loadPortfolio() {
 }
 $("#portRefresh").onclick = loadPortfolio;
 
+// --- NAV Tracking + EMA (Zerodha-like, customizable) ---
+let EMAS = JSON.parse(localStorage.getItem("emas") || '[{"period":10,"timeframe":"daily"}]');
+let navTf = localStorage.getItem("navTf") || "daily";
+function saveEmas(){ localStorage.setItem("emas", JSON.stringify(EMAS)); localStorage.setItem("navTf", navTf); }
+
+async function loadNavTrack(){
+  const tfBtns = document.querySelectorAll("#navTfSw button");
+  tfBtns.forEach(b=> b.classList.toggle("on", b.dataset.tf===navTf));
+  document.getElementById("emaTf").value = navTf;
+  // render EMA list pills
+  const list = document.getElementById("emaList");
+  if(list){
+    list.innerHTML = EMAS.map((e,i)=> `<span class="tag keep" style="gap:6px">${esc(e.timeframe)} EMA ${e.period} <button onclick="removeEma(${i})" style="border:0;background:transparent;cursor:pointer;color:inherit;font-weight:800;padding:0 2px">✕</button></span>`).join("") || `<span class="muted" style="font-size:12px">Koi EMA nahi — EMA 10 daily add karo</span>`;
+    window.removeEma = (i)=>{ EMAS.splice(i,1); saveEmas(); loadNavTrack(); toast("EMA removed","info"); };
+  }
+  // fetch history
+  let hist = [];
+  try{ const r = await api(`/api/portfolio/nav_history?limit=90&timeframe=${navTf}`); hist = r.history || []; }catch(e){ hist=[]; }
+  const label = document.getElementById("navRangeLabel");
+  if(label) label.textContent = hist.length ? `${hist.length} points (${navTf})` : "no history yet — refresh portfolio to record";
+  // build datasets: NAV + each EMA
+  if(!hist.length){
+    const c=document.getElementById("navTrackChart");
+    if(c && c._chart) { c._chart.destroy(); c._chart=null; }
+    return;
+  }
+  const labels = hist.map(r=> (r.captured_at||"").slice(5,10));
+  const navs = hist.map(r=> r.nav);
+  let datasets = [{ label:"NAV", data:navs, borderColor:"#0f172a", backgroundColor:"rgba(15,23,42,.04)", fill:false, tension:.35, pointRadius:0, borderWidth:2 }];
+  const paletteEmas = ["#2563eb","#059669","#ea580c","#7c3aed","#eab308"];
+  for(let idx=0; idx<EMAS.length; idx++){
+    const e = EMAS[idx];
+    try{
+      const r = await api(`/api/portfolio/ema?period=${e.period}&timeframe=${e.timeframe}&limit=90`);
+      const emas = r.data.map(d=> d.ema);
+      datasets.push({ label:`EMA ${e.period} ${e.timeframe}`, data:emas, borderColor:paletteEmas[idx%paletteEmas.length], backgroundColor:"transparent", fill:false, tension:.35, pointRadius:0, borderWidth:1.5, borderDash: e.timeframe==="weekly" ? [6,3] : [] });
+    }catch(err){}
+  }
+  const c=document.getElementById("navTrackChart");
+  if(c && window.Chart){
+    if(c._chart) c._chart.destroy();
+    c._chart = new Chart(c.getContext("2d"),{
+      type:"line",
+      data:{ labels, datasets },
+      options:{
+        interaction:{ mode:"index", intersect:false },
+        plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label:(ctx)=> `${ctx.dataset.label}: ${inr(ctx.parsed.y)}` } } },
+        scales:{ x:{ grid:{display:false}, ticks:{ maxTicksLimit:8 }}, y:{ grid:{ color:"rgba(148,163,184,.12)"}, ticks:{ callback:v=> inr(v)} } },
+        animation:{ duration:400}
+      }
+    });
+  }
+}
+document.querySelectorAll("#navTfSw button").forEach(b=> b.onclick=()=>{ navTf=b.dataset.tf; saveEmas(); loadNavTrack(); toast(`Timeframe ${navTf}`,"info"); });
+document.querySelectorAll("#emaPreset button").forEach(b=> b.onclick=()=>{
+  const p=parseInt(b.dataset.p,10);
+  const tf=document.getElementById("emaTf").value;
+  if(!EMAS.some(e=>e.period===p && e.timeframe===tf)){
+    EMAS.push({period:p, timeframe:tf}); saveEmas(); loadNavTrack(); toast(`EMA ${p} ${tf} added`,"good");
+  }
+});
+document.getElementById("emaAddBtn") && (document.getElementById("emaAddBtn").onclick=()=>{
+  const p=parseInt(document.getElementById("emaCustom").value,10);
+  const tf=document.getElementById("emaTf").value;
+  if(!(p>=2 && p<=200)){ toast("Period 2-200","bad"); return; }
+  if(EMAS.some(e=>e.period===p && e.timeframe===tf)){ toast("Already exists","warn"); return; }
+  EMAS.push({period:p, timeframe:tf}); saveEmas(); loadNavTrack(); toast(`EMA ${p} ${tf} added`,"good");
+  document.getElementById("emaCustom").value="";
+});
+document.getElementById("emaClearBtn") && (document.getElementById("emaClearBtn").onclick=()=>{ EMAS=[]; saveEmas(); loadNavTrack(); toast("EMAs cleared","info"); });
+document.getElementById("emaTf") && (document.getElementById("emaTf").onchange=(e)=>{ navTf=e.target.value; saveEmas(); loadNavTrack(); });
+
+// --- Fund Flows (Zerodha-like) ---
+async function loadFundFlows(){
+  try{
+    const r = await api("/api/portfolio/fund_flows?limit=20");
+    const rows = r.flows || [];
+    const head = `<thead><tr><th>S.No</th><th class="l">Date</th><th>Type</th><th>Amount</th><th class="l">Note</th></tr></thead>`;
+    const body = rows.length ? rows.map((f, idx)=> `<tr><td class="num">${idx+1}</td><td class="l muted">${esc((f.flow_date||"").slice(0,16).replace("T"," "))}</td><td><span class="tag ${f.flow_type==="DEPOSIT"?"keep":"OUT"}">${esc(f.flow_type)}</span></td><td class="num" style="color:${f.amount>=0?'var(--good)':'var(--critical)'}">${f.amount>=0?"+":""}${inr(f.amount)}</td><td class="l muted">${esc(f.note||"")}</td></tr>`).join("") : `<tr><td colspan="5" class="l muted" style="padding:14px">Koi fund flow nahi — withdraw/deposit track hoga</td></tr>`;
+    document.getElementById("flowTable").innerHTML = head + `<tbody>${body}</tbody>`;
+  }catch(e){}
+}
+document.getElementById("flowAddBtn") && (document.getElementById("flowAddBtn").onclick=async()=>{
+  const amt = parseFloat(String(document.getElementById("flowAmt").value).replace(/[^0-9.-]/g,""));
+  const typ = document.getElementById("flowType").value;
+  const note = document.getElementById("flowNote").value.trim();
+  if(!(amt>0)){ toast("Amount daalo","bad"); return; }
+  const b=document.getElementById("flowAddBtn"); busy(b,true,"...");
+  try{
+    await api("/api/portfolio/fund_flow",{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({amount:amt, flow_type:typ, note})});
+    toast(`${typ} ${inr(amt)} logged ✓`,"good");
+    document.getElementById("flowAmt").value=""; document.getElementById("flowNote").value="";
+    await loadFundFlows(); await loadPortfolio(); await loadNavTrack();
+  }catch(e){ document.getElementById("flowMsg").innerHTML = banner("block","!", esc(e.message)); }
+  busy(b,false);
+});
+// hook into portfolio load
+const _origLoadPortfolio = loadPortfolio;
+loadPortfolio = async function(){
+  const r = await _origLoadPortfolio();
+  try{ await loadNavTrack(); }catch(e){}
+  try{ await loadFundFlows(); }catch(e){}
+  return r;
+};
+
 $("#sellAllBtn").onclick = async () => {
   if (!confirm("POORA PORTFOLIO bechne ka plan banayein?\n\nAbhi sirf plan banega -- koi order nahi jaayega.\nExecute tab par jaakar 'sab bech do' likhna padega.")) return;
   const b = $("#sellAllBtn"); busy(b, true, "Plan bana rahe hain...");

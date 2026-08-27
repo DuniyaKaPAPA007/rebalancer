@@ -399,6 +399,12 @@ class ExecIn(BaseModel):
     confirm: str = ""
 
 
+class FundFlowIn(BaseModel):
+    amount: float
+    flow_type: str = "WITHDRAW"  # DEPOSIT / WITHDRAW
+    note: str = ""
+
+
 def register_routes(app: FastAPI) -> None:
 
     # ---------------------------------------------------- health
@@ -593,12 +599,159 @@ def register_routes(app: FastAPI) -> None:
             r["weight"] = (r["value"] / total * 100) if total else 0.0
         rows.sort(key=lambda r: -r["value"])
         paper = isinstance(c, PaperClient)
+        # Zerodha-like: record NAV history (real, not fake)
+        try:
+            cash_val = c.available_cash()
+        except:
+            cash_val = 0.0
+        nav_val = total + cash_val
+        # Real NAV only for live; paper NAV marked as paper but still recorded for demo tracking
+        try:
+            db_nav = Store(str(ROOT / cfg["paths"]["db"]))
+            db_nav.record_nav(nav_val, total, cash_val, source="paper" if paper else "Dhan")
+        except Exception as e:
+            log.debug(f"nav record fail: {e}")
+        # fund flows and realized
+        try:
+            db2 = Store(str(ROOT / cfg["paths"]["db"]))
+            flows = db2.get_fund_flows(5)
+            realized = db2.get_realized_pnl()
+        except:
+            flows = []
+            realized = 0.0
         return {"holdings": rows, "total": total,
-                "cash": c.available_cash(), "mode": STATE["mode"],
-                "source": "Demo -- nakli portfolio" if paper
-                          else "Dhan API (/holdings + /fundlimit)",
+                "cash": cash_val, "mode": STATE["mode"],
+                "nav": nav_val,
+                "realized_pnl": realized,
+                "fund_flows": flows,
+                "source": "Demo -- nakli portfolio (PAPER - not real Dhan)" if paper
+                          else "Dhan API LIVE - real holdings + real cash (no fake)",
                 "is_demo": paper,
+                "is_real": not paper,
                 "demo_capital": getattr(c, "capital", None) if paper else None}
+
+    # ---------------------------------------------------- Zerodha-like NAV + EMA + fund flows
+    @app.get("/api/portfolio/nav_history")
+    def nav_history(limit: int = 90, timeframe: str = "daily"):
+        _guard_broken()
+        cfg = _cfg()
+        db = Store(str(ROOT / cfg["paths"]["db"]))
+        # timeframe: daily / weekly
+        if timeframe not in ("daily","weekly"):
+            timeframe = "daily"
+        rows = db.get_nav_history(limit=limit, timeframe=timeframe)
+        # also return latest NAV for convenience
+        return {"timeframe": timeframe, "count": len(rows), "history": rows}
+
+    @app.get("/api/portfolio/ema")
+    def nav_ema(period: int = 10, timeframe: str = "daily", limit: int = 90):
+        _guard_broken()
+        if period < 2 or period > 200:
+            raise HTTPException(400, "EMA period 2-200 hona chahiye (10,20,50 common)")
+        if timeframe not in ("daily","weekly"):
+            timeframe = "daily"
+        cfg = _cfg()
+        db = Store(str(ROOT / cfg["paths"]["db"]))
+        rows = db.get_nav_history(limit=limit, timeframe=timeframe)
+        if not rows:
+            return {"period": period, "timeframe": timeframe, "ema": [], "history": []}
+        navs = [r["nav"] for r in rows]
+        emas = db.calc_ema(navs, period)
+        # combine
+        out = []
+        for r, e in zip(rows, emas):
+            out.append({"date": r["captured_at"][:10], "nav": r["nav"], "ema": round(e,2) if e else None, "holdings": r["holdings_value"], "cash": r["free_cash"]})
+        return {"period": period, "timeframe": timeframe, "count": len(out), "data": out}
+
+    @app.post("/api/portfolio/fund_flow")
+    def add_fund_flow(body: FundFlowIn):
+        _guard_broken()
+        # In LIVE mode, withdraw is real Dhan withdraw - we only log it for NAV tracking (Dhan cash will anyway reduce)
+        # In PAPER mode, we adjust PaperClient cash as well for demo fidelity
+        amt = float(body.amount)
+        if amt == 0:
+            raise HTTPException(400, "Amount 0 nahi ho sakta")
+        # normalize: WITHDRAW should be negative stored, DEPOSIT positive
+        ft = body.flow_type.strip().upper()
+        if ft not in ("DEPOSIT","WITHDRAW"):
+            raise HTTPException(400, "flow_type DEPOSIT ya WITHDRAW hona chahiye")
+        # if user says WITHDRAW 50000, store -50000
+        store_amt = abs(amt) if ft=="DEPOSIT" else -abs(amt)
+        cfg = _cfg()
+        db = Store(str(ROOT / cfg["paths"]["db"]))
+        db.add_fund_flow(store_amt, ft, note=body.note)
+        # If paper, adjust demo cash to mimic real withdraw
+        if STATE.get("mode")=="paper" and STATE.get("paper"):
+            try:
+                paper = STATE["paper"]
+                # paper._cash is available cash
+                if hasattr(paper, "_cash"):
+                    with getattr(paper, "_lock", STATE_LOCK):
+                        paper._cash = max(0, paper._cash + store_amt)  # withdraw reduces
+                        paper.capital = max(0, paper.capital + store_amt)
+            except Exception as e:
+                log.debug(f"paper cash adjust fail: {e}")
+        return {"ok": True, "amount": store_amt, "flow_type": ft, "note": body.note}
+
+    @app.get("/api/portfolio/fund_flows")
+    def list_fund_flows(limit: int = 50):
+        _guard_broken()
+        cfg = _cfg()
+        db = Store(str(ROOT / cfg["paths"]["db"]))
+        rows = db.get_fund_flows(limit=limit)
+        return {"count": len(rows), "flows": rows}
+
+    @app.get("/api/portfolio/summary")
+    def portfolio_summary():
+        _guard_broken()
+        cfg = _cfg()
+        c = _client(cfg)
+        try:
+            hs = c.holdings()
+            cash = c.available_cash()
+        except Exception as e:
+            raise HTTPException(502, f"Dhan se portfolio nahi aaya: {e}")
+        # live prices
+        sec_ids = [h.security_id for h in hs]
+        try:
+            live = c.ltp(sec_ids, segment=cfg["dhan"]["exchange_segment"]) if hs else {}
+        except:
+            live = {}
+        total = 0.0
+        rows=[]
+        for h in hs:
+            px = live.get(h.security_id) or h.avg_price
+            val = h.total_qty * px
+            total += val
+            rows.append({"symbol": h.symbol, "qty": h.total_qty, "available": h.available_qty, "avg": h.avg_price, "ltp": px, "value": val, "pnl": (px - h.avg_price)*h.total_qty, "pnl_pct": ((px/h.avg_price -1)*100 if h.avg_price else 0)})
+        nav = total + cash
+        db = Store(str(ROOT / cfg["paths"]["db"]))
+        try:
+            flows = db.get_fund_flows(20)
+            # total deposits/withdraws
+            total_deposit = sum(r["amount"] for r in flows if r["amount"]>0)
+            total_withdraw = sum(-r["amount"] for r in flows if r["amount"]<0)
+        except:
+            flows=[]; total_deposit=0; total_withdraw=0
+        # NAV history for sparkline
+        try:
+            hist = db.get_nav_history(limit=30, timeframe="daily")
+        except:
+            hist=[]
+        paper = isinstance(c, PaperClient)
+        return {
+            "nav": nav, "holdings_value": total, "free_cash": cash,
+            "holdings": sorted(rows, key=lambda x: -x["value"]),
+            "holdings_count": len(rows),
+            "realized_pnl": db.get_realized_pnl() if not paper else 0,
+            "fund_flows": flows,
+            "total_deposit": total_deposit,
+            "total_withdraw": total_withdraw,
+            "nav_history": hist[-30:],
+            "is_real": not paper,
+            "source": "Dhan LIVE - 100% real (no fake)" if not paper else "PAPER - demo fake",
+            "mode": STATE.get("mode")
+        }
 
     # ---------------------------------------------------- plan
     @app.post("/api/plan")

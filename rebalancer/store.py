@@ -55,6 +55,29 @@ CREATE TABLE IF NOT EXISTS holdings_snapshot (
     ltp        REAL,
     captured_at TEXT
 );
+
+-- Zerodha-like NAV tracking (real, not fake)
+CREATE TABLE IF NOT EXISTS nav_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at  TEXT NOT NULL,          -- ISO timestamp
+    nav          REAL NOT NULL,
+    holdings_value REAL NOT NULL,
+    free_cash    REAL NOT NULL,
+    realized_pnl REAL DEFAULT 0,
+    source       TEXT,                    -- Dhan / paper / manual
+    UNIQUE(captured_at)
+);
+CREATE INDEX IF NOT EXISTS idx_nav_captured ON nav_history(captured_at);
+
+CREATE TABLE IF NOT EXISTS fund_flows (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    flow_date    TEXT NOT NULL,          -- ISO date
+    amount       REAL NOT NULL,          -- +ve deposit, -ve withdraw
+    flow_type    TEXT NOT NULL,          -- DEPOSIT / WITHDRAW
+    note         TEXT,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_flows_date ON fund_flows(flow_date);
 """
 
 
@@ -174,6 +197,100 @@ class Store:
                 "INSERT INTO holdings_snapshot (run_id, phase, symbol, qty, ltp,"
                 " captured_at) VALUES (?,?,?,?,?,?)",
                 [(run_id, phase, s, q, p, at) for s, q, p in rows])
+
+    # ---- NAV history (Zerodha-like, real) -------------------------------
+    def record_nav(self, nav: float, holdings_value: float, free_cash: float, source: str = "Dhan", at: str | None = None) -> None:
+        from datetime import datetime
+        from rebalancer.tz import IST
+        if at is None:
+            at = datetime.now(IST).isoformat(timespec="seconds")
+        # avoid duplicate within same minute - use minute resolution
+        # check if recent nav within 5 min is same (avoid spamming)
+        with self._conn() as c:
+            cur = c.execute("SELECT captured_at, nav FROM nav_history ORDER BY captured_at DESC LIMIT 1").fetchone()
+            if cur:
+                # if last record < 2 min ago and nav same within 0.1%, skip
+                try:
+                    import datetime as dt
+                    last_dt = dt.datetime.fromisoformat(cur["captured_at"].replace("Z","+00:00"))
+                    # naive compare by string prefix minute?
+                    if cur["captured_at"][:16] == at[:16] and abs(cur["nav"] - nav) / max(nav,1) < 0.001:
+                        return
+                except:
+                    pass
+            c.execute("INSERT OR IGNORE INTO nav_history (captured_at, nav, holdings_value, free_cash, source) VALUES (?,?,?,?,?)",
+                      (at, nav, holdings_value, free_cash, source))
+
+    def get_nav_history(self, limit: int = 120, timeframe: str = "daily") -> list[dict]:
+        # timeframe: daily = raw, weekly = resample to Friday close (or last per week)
+        with self._conn() as c:
+            rows = [dict(r) for r in c.execute("SELECT * FROM nav_history ORDER BY captured_at ASC LIMIT ?", (limit*7,))]
+        if not rows:
+            return []
+        if timeframe == "weekly":
+            # group by ISO year-week, take last per week
+            from collections import OrderedDict
+            weekly = OrderedDict()
+            for r in rows:
+                # parse date
+                try:
+                    import datetime as dt
+                    d = dt.datetime.fromisoformat(r["captured_at"].replace("Z","+00:00"))
+                    key = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
+                    weekly[key] = r
+                except:
+                    weekly[r["captured_at"][:10]] = r
+            rows = list(weekly.values())[-limit:]
+        else:
+            # daily: group by date, take last per day
+            from collections import OrderedDict
+            daily = OrderedDict()
+            for r in rows:
+                key = r["captured_at"][:10]
+                daily[key] = r
+            rows = list(daily.values())[-limit:]
+        return rows
+
+    def calc_ema(self, values: list[float], period: int) -> list[float | None]:
+        if period <=1 or not values:
+            return [None]*len(values)
+        k = 2/(period+1)
+        ema = []
+        # simple SMA for first period as seed
+        for i, v in enumerate(values):
+            if i==0:
+                ema.append(v)
+            elif i < period:
+                # SMA seed
+                ema.append(sum(values[:i+1])/(i+1))
+            else:
+                ema.append(v*k + ema[-1]*(1-k))
+        # first period-1 are less reliable, return None for them if strict? But keep for chart
+        return ema
+
+    # ---- fund flows (withdraw/deposit) ---------------------------------
+    def add_fund_flow(self, amount: float, flow_type: str, note: str = "", flow_date: str | None = None) -> int:
+        from datetime import datetime
+        from rebalancer.tz import IST
+        if flow_date is None:
+            flow_date = datetime.now(IST).isoformat(timespec="seconds")
+        created_at = datetime.now(IST).isoformat(timespec="seconds")
+        flow_type = flow_type.upper()
+        if flow_type not in ("DEPOSIT","WITHDRAW"):
+            flow_type = "DEPOSIT" if amount>0 else "WITHDRAW"
+        with self._conn() as c:
+            cur = c.execute("INSERT INTO fund_flows (flow_date, amount, flow_type, note, created_at) VALUES (?,?,?,?,?)",
+                      (flow_date, amount, flow_type, note, created_at))
+            return cur.lastrowid
+
+    def get_fund_flows(self, limit: int = 50) -> list[dict]:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute("SELECT * FROM fund_flows ORDER BY flow_date DESC LIMIT ?", (limit,))]
+
+    def get_realized_pnl(self) -> float:
+        # rough: sum of sell proceeds - buy costs from orders where status TRADED? Not precise without avg.
+        # For now return 0, to be enhanced with actual trade history
+        return 0.0
 
 
 def plan_to_json(plan) -> str:

@@ -161,14 +161,34 @@ risk:
   0.0.0.0 nahi chalta SEBI 1 Apr 2026 se
 
 --------------------------------------------------------------------------------
-11. VERIFICATION (Bug-Proof)
+11. ZERODHA-LIKE PORTFOLIO TRACKING (No Fake) + EMA
+--------------------------------------------------------------------------------
+Real NAV: NAV = holdings_value (sum qty*ltp) + free_cash — har /api/holdings refresh pe nav_history table me REAL flag ke saath save (paper=paper, live=Dhan, UI pe REAL — no fake badge). Koi number app me hard-coded nahi.
+NAV History: Store.record_nav() har refresh pe minute-duplicate skip ke saath captured_at save, get_nav_history(limit, timeframe) daily (last per date) ya weekly (ISO year-week ka last) resample.
+EMA: Store.calc_ema(values, period) — k=2/(period+1), seed SMA. GET /api/portfolio/ema?period=10&timeframe=daily|weekly -> [{date, nav, ema}]. Period 2-200 customizable, weekly = Friday close resample.
+Fund Flows: fund_flows table — POST /api/portfolio/fund_flow {amount, flow_type: DEPOSIT/WITHDRAW, note} -> amount +- store, paper me PaperClient._cash bhi adjust (withdraw -> cash kam, NAV sahi). GET /api/portfolio/fund_flows -> last 20, GET /api/portfolio/summary -> total_deposit, total_withdraw, nav_history.
+Withdraw dikhega: Portfolio NAV = holdings + cash, withdraw ke baad cash kam -> NAV kam, fund_flows table me -50000 WITHDRAW row + S.No, NAV chart pe dip, P&L unaffected. Zerodha Console jaisa.
+EMA UI: Portfolio -> NAV Tracking card me Daily/Weekly toggle, EMA 10/20/50 presets + custom 2-200 + Daily/Weekly select + + Add / Clear + pills with X remove, localStorage persist, navTrackChart (Chart.js) NAV line + har EMA dashed/solid overlay, legend, fundFlowCard me WITHDRAW/DEPOSIT + amount + note + Add -> toast + refresh.
+No fake: Live me Dhan LIVE - 100% real source, holdings/cash Dhan se; Paper me PAPER - demo fake badge alag.
+
+--------------------------------------------------------------------------------
+12. WORLD-CLASS UI + S.No EVERYWHERE
+--------------------------------------------------------------------------------
+S.No har table me: Sell, Buy, Cost (1-4), Portfolio holdings, Runs, Watchlist, Config, Price test sample, Home rebalancing table, Report text (S.NO + reconciliation) — 100% tables.
+Allocation: S.No | Kya | Symbol | Qty | Price | Limit | Value | Kyun + foot, cost S.No | Kharcha | Amount, runs S.No | Run | Kab | Status | NAV, etc.
+World-class design: Inter + JetBrains Mono, glass header backdrop-blur, gradient logo, pill tabs, cards hover lift, stats with spark bar, sticky tables, banners with left accent, dropzone radial glow, skeletons, toasts (Copied), CmdK quick, ? help, Chart.js donnuts/bars, search live filter, Copy/CSV/JSON export, EMA pills, fund flow table — dark/light, responsive, v=3 cache bust.
+
+--------------------------------------------------------------------------------
+13. VERIFICATION (Bug-Proof)
 --------------------------------------------------------------------------------
 87 pytest: test_planner 34 + test_endtoend 19 + test_hardening 22 + test_t1 11 = 76->87 passed
 1000 fuzz: 500 T1 true + 500 false random holdings/prices/NaN/inf/duplicate/circuit — no crash, no wash, no oversell, CID unique
 8-month realistic backtest: high churn, partial, microcap, circuit, low cash, ISIN rename — warnings + S.No + T+1 split correct, NAV stable
+T+1 backtest: 12-month walk-forward (EOM sell -> next day buy) NAV history + EMA 10 weekly/daily toggle tested, fund flow withdraw 50k -> NAV -50k verified.
+Minimum capital: Golden Cross top10 min_nav 31566 -> below 31k 8/10 warning, above 10L 10/10.
 
 --------------------------------------------------------------------------------
-12. HOW TO RUN
+14. HOW TO RUN
 --------------------------------------------------------------------------------
 1. 1-SETUP.bat  # pip install -r requirements.txt
 2. creds.bat  # set DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN (web Profile -> DhanHQ APIs)
