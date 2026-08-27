@@ -306,9 +306,11 @@ document.documentElement.dataset.themeChoice=s;})();
       <div class="modesw" id="navTfSw">
         <button data-tf="daily" class="on">Daily</button>
         <button data-tf="weekly">Weekly</button>
+        <button data-tf="monthly">Monthly</button>
+        <button data-tf="yearly">Yearly</button>
       </div>
     </div>
-    <div class="sub">Har refresh pe NAV = holdings value + free cash (Dhan se 100% real) save hota hai. EMA se portfolio return trend track karo — Zerodha Console jaisa.</div>
+    <div class="sub">Har refresh pe NAV = holdings value + free cash (Dhan se 100% real) save hota hai. EMA se portfolio return trend track karo — Zerodha Console jaisa. <span class="muted">Daily = har din ka last, Weekly = Friday close, Monthly = month ka last, Yearly = saal ka last.</span></div>
     <div class="chart-card">
       <div class="chart-title"><span class="dot" style="background:var(--s1)"></span> NAV History <span class="muted" id="navRangeLabel" style="font-weight:400;font-size:12px"></span></div>
       <canvas id="navTrackChart" height="160"></canvas>
@@ -324,12 +326,14 @@ document.documentElement.dataset.themeChoice=s;})();
       <select id="emaTf" style="border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:10px 12px;font:600 13px Inter">
         <option value="daily">Daily EMA</option>
         <option value="weekly">Weekly EMA</option>
+        <option value="monthly">Monthly EMA</option>
+        <option value="yearly">Yearly EMA</option>
       </select>
       <button class="btn" id="emaAddBtn">+ Add EMA</button>
       <button class="btn ghost" id="emaClearBtn">Clear</button>
     </div>
     <div id="emaList" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap"></div>
-    <div class="muted" style="margin-top:8px;font-size:12px">EMA = 2/(period+1) weighted — customizable, add/remove kar sakte ho. Weekly = Friday close resampled.</div>
+    <div class="muted" style="margin-top:8px;font-size:12px">EMA = 2/(period+1) weighted — customizable, add/remove kar sakte ho. Daily/Weekly/Monthly/Yearly resample.</div>
   </div>
 
   <div class="card" id="fundFlowCard">

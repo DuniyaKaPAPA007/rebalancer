@@ -636,8 +636,8 @@ def register_routes(app: FastAPI) -> None:
         _guard_broken()
         cfg = _cfg()
         db = Store(str(ROOT / cfg["paths"]["db"]))
-        # timeframe: daily / weekly
-        if timeframe not in ("daily","weekly"):
+        # timeframe: daily / weekly / monthly / yearly
+        if timeframe not in ("daily","weekly","monthly","yearly"):
             timeframe = "daily"
         rows = db.get_nav_history(limit=limit, timeframe=timeframe)
         # also return latest NAV for convenience
@@ -648,7 +648,7 @@ def register_routes(app: FastAPI) -> None:
         _guard_broken()
         if period < 2 or period > 200:
             raise HTTPException(400, "EMA period 2-200 hona chahiye (10,20,50 common)")
-        if timeframe not in ("daily","weekly"):
+        if timeframe not in ("daily","weekly","monthly","yearly"):
             timeframe = "daily"
         cfg = _cfg()
         db = Store(str(ROOT / cfg["paths"]["db"]))
