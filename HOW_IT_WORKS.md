@@ -159,14 +159,34 @@ Trendlyne CSV (25 rows)
 
 ---
 
-## 11. Zerodha-like Portfolio Tracking (No Fake Data) + EMA
+## 11. Zerodha-like Portfolio Tracking (No Fake Data) + NAV + EMA
 
-* **Real NAV:** `NAV = holdings_value (Σ qty*ltp) + free_cash` — har `/api/holdings` refresh pe `nav_history` table me `REAL` flag ke saath save (paper = `paper` flag, live = `Dhan` flag, UI pe `REAL — no fake` badge). Koi number app me hard-coded nahi.
-* **NAV History:** `Store.record_nav()` har refresh pe minute-duplicate skip ke saath `captured_at` save, `get_nav_history(limit, timeframe)` daily (last per date) ya weekly (ISO year-week ka last) resample.
-* **EMA:** `Store.calc_ema(values, period)` — `k=2/(period+1)`, seed SMA. `GET /api/portfolio/ema?period=10&timeframe=daily|weekly` → `[{date, nav, ema}]`. Period `2-200` customizable, `weekly` = Friday close resample.
-* **Fund Flows:** `fund_flows` table — `POST /api/portfolio/fund_flow {amount, flow_type: DEPOSIT/WITHDRAW, note}` → `amount` ± store, paper mode me `PaperClient._cash` bhi adjust (withdraw → cash kam, NAV sahi). `GET /api/portfolio/fund_flows` → last 20, `GET /api/portfolio/summary` → `total_deposit, total_withdraw, nav_history`.
-* **Withdraw dikhega:** Portfolio `NAV = holdings + cash`, withdraw ke baad `cash` kam → NAV kam, fund_flows table me `-₹50000 WITHDRAW` row + `S.No`, NAV chart pe dip, P&L unaffected (realized 0). Zerodha Console jaisa.
-* **EMA UI:** `Portfolio → NAV Tracking` card me `Daily/Weekly` toggle, `EMA 10/20/50` presets + custom `2-200` + `Daily/Weekly` select + `+ Add` / `Clear` + pills with `✕` remove, localStorage persist, `navTrackChart` (Chart.js) NAV line + har EMA dashed/solid overlay, legend, `fundFlowCard` me `WITHDRAW/DEPOSIT` + amount + note + `Add` → toast + refresh.
+### 11.1 NAV kaise banta hai — 100% Real, No Fake
+
+* **Formula:** `NAV = holdings_value + free_cash`  
+  `holdings_value = Σ ( har stock ka qty × uska live LTP )`  
+  Example: `CHENNPETRO 71×1393.50=98,938 + IIFL 145×679.80=98,571 + ... + free_cash 50,000 = NAV 10,50,000`
+* **Kahan se aata hai:**
+  * `holdings` → Dhan API `GET /holdings` → `tradingSymbol, totalQty, availableQty, avgCostPrice` (bonus/split/merger Dhan khud adjust kar deta hai, `runs.db` me nahi)
+  * `free_cash` → Dhan API `GET /fundlimit` → `availabelBalance` (typo wala key bhi handle)
+  * `LTP` → Dhan `POST /marketfeed/ltp` (1 req/s) → fallback `yahoo/nse` agar paid Data API nahi (delayed ~15m, warning)
+  * **Live me** `source = Dhan LIVE - 100% real` badge, **Paper** me `PAPER - demo fake` badge — confuse nahi.
+* **Kab save hota hai:** Har `Portfolio` refresh (`/api/holdings`) + har `Plan` execute ke `reconcile` pe `Store.record_nav(nav, holdings_value, free_cash, source, captured_at)` call hota hai. Same minute me duplicate (`captured_at[:16]` same aur NAV 0.1% same) skip — spam nahi. Table `nav_history(captured_at, nav, holdings_value, free_cash, source)` me `PRAGMA WAL` ke saath.
+* **Daily vs Weekly:** `GET /api/portfolio/nav_history?timeframe=daily` → har date ka last record; `weekly` → `ISO year-week` ka last (Friday close jaisa) — `OrderedDict` se resample. Limit `90` default, `30` chart me.
+
+### 11.2 EMA kaise nikalta hai — Customizable
+
+* **Formula:** `k = 2 / (period+1)` ; `EMA[0]=NAV[0]` ; `EMA[i]= NAV[i]*k + EMA[i-1]*(1-k)` ; Seed `SMA` pehle `period` tak. Example `period=10, NAV=100,102,105` → `k=0.1818`, `EMA1=100, EMA2=100*0.1818+100*0.818=100.36`...
+* **API:** `GET /api/portfolio/ema?period=10&timeframe=daily&limit=90` → `[{date, nav, ema}]` period `2-200` (10,20,50 common). `weekly` me weekly NAV pe EMA — long trend, `daily` me short trend.
+* **Custom:** UI me `EMA 10/20/50` preset + custom input `2-200` + `Daily/Weekly` select + `+ Add / Clear` + pills `EMA 10 daily ✕` (localStorage `emas` + `navTf` persist, `navTrackChart` me NAV solid `#0f172a` + EMA dashed colors).
+
+### 11.3 Fund Flows — Withdraw/Deposit Zerodha jaisa
+
+* **Table:** `fund_flows(flow_date, amount, flow_type, note, created_at)` — `amount` `+` = DEPOSIT, `-` = WITHDRAW.
+* **API:** `POST /api/portfolio/fund_flow {amount:50000, flow_type:WITHDRAW, note:"rent"}` → `-50000` store, Paper me `PaperClient._cash` bhi `+ amount` (withdraw kam) + `capital` adjust, Live me Dhan ka real cash kam hoga — app sirf track karti hai, double debit nahi.
+* **Effect:** `NAV = holdings + cash`, withdraw ke baad `cash -50k` → `NAV -50k`, `holdings_value` same, `P&L` same (realized 0), `nav_history` next point pe dip, `fund_flows` table me `S.No | Date | WITHDRAW | -₹50,000 | rent`, `summary` me `total_deposit / total_withdraw`. Deposit reverse.
+* **Example:** `NAV 10L (9.5L holdings + 50k cash) → WITHDRAW 50k → holdings 9.5L + cash 0 = NAV 9.5L → deposit 1L → NAV 10.5L`. Chart pe dip/spike dikhega, EMA usko smooth karega — return track karne ke liye NAV ko EMA ke upar/neeche dekho.
+
 * **No fake:** Live me `Dhan LIVE - 100% real` source, holdings/cash Dhan se; Paper me `PAPER - demo fake` badge alag, confuse nahi.
 
 ---
