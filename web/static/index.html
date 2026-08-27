@@ -15,14 +15,17 @@ document.documentElement.dataset.themeChoice=s;})();
 <body>
 
 <header>
-  <div>
-    <h1>Weekly Rebalancer</h1>
-    <div class="cap">connect &rarr; CSV upload &rarr; plan dekho &rarr; rehearsal &rarr; execute</div>
+  <div class="logo">
+    <div class="logo-icon">◈</div>
+    <div>
+      <h1>Weekly Rebalancer</h1>
+      <div class="cap">connect &rarr; CSV &rarr; plan &rarr; rehearsal &rarr; execute</div>
+    </div>
   </div>
   <div class="spacer"></div>
   <div class="modesw" id="modeSw">
     <button data-mode="paper" class="on">Demo</button>
-    <button data-mode="live">Live (asli paisa)</button>
+    <button data-mode="live">Live</button>
   </div>
   <div id="healthBadge" class="badge"><span class="dot"></span><span>checking…</span></div>
   <button class="iconbtn" id="themeBtn" title="Light / dark">
@@ -176,20 +179,48 @@ document.documentElement.dataset.themeChoice=s;})();
     <div id="planBanners"></div>
     <div class="stats" id="planStats"></div>
 
-    <div class="card">
-      <h2>Bechna hai</h2>
-      <div class="sub" id="sellSub"></div>
-      <div style="overflow-x:auto"><table id="sellTable"></table></div>
+    <div class="grid2">
+      <div class="chart-card">
+        <div class="chart-title"><span class="dot" style="background:var(--buy)"></span> Allocation</div>
+        <canvas id="allocChart" height="180"></canvas>
+        <div class="legend" id="allocLegend"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title"><span class="dot" style="background:var(--s3)"></span> Cost Split</div>
+        <canvas id="costChart" height="180"></canvas>
+        <div class="muted" id="costHint" style="margin-top:8px;font-size:12.5px"></div>
+      </div>
     </div>
 
     <div class="card">
-      <h2>Kharidna hai</h2>
-      <div class="sub" id="buySub"></div>
-      <div style="overflow-x:auto"><table id="buyTable"></table></div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <h2 style="margin:0">Bechna hai</h2>
+        <span class="muted" id="sellSub"></span>
+        <div class="spacer"></div>
+        <div class="search"><input type="text" id="sellSearch" placeholder="Search symbol…"></div>
+        <button class="btn ghost" id="sellCopyBtn" data-tip="Copy table">⎘ Copy</button>
+      </div>
+      <div class="table-wrap" style="margin-top:14px"><table id="sellTable"></table></div>
     </div>
 
     <div class="card">
-      <h2>Kharcha</h2>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <h2 style="margin:0">Kharidna hai</h2>
+        <span class="muted" id="buySub"></span>
+        <div class="spacer"></div>
+        <div class="search"><input type="text" id="buySearch" placeholder="Search symbol…"></div>
+        <button class="btn ghost" id="buyCopyBtn" data-tip="Copy table">⎘ Copy</button>
+      </div>
+      <div class="table-wrap" style="margin-top:14px"><table id="buyTable"></table></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:12px">
+        <h2 style="margin:0">Kharcha</h2>
+        <div class="spacer"></div>
+        <button class="btn ghost" id="exportBtn">⬇ CSV</button>
+        <button class="btn ghost" id="exportJsonBtn">⬇ JSON</button>
+      </div>
       <div class="sub">Sirf broker charges. Slippage aur STCG tax isme nahi hai.</div>
       <table id="costTable"></table>
       <details class="raw"><summary>Poora text plan dekho</summary><pre class="mono" id="rawPlan"></pre></details>
@@ -243,12 +274,27 @@ document.documentElement.dataset.themeChoice=s;})();
   </div>
 
   <div class="card">
-    <h2>Abhi kya hai</h2>
-    <div class="sub" id="portSub">Load kar rahe hain…</div>
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">Abhi kya hai</h2>
+      <span class="muted" id="portSub">Load kar rahe hain…</span>
+      <div class="spacer"></div>
+      <div class="search"><input type="text" id="portSearch" placeholder="Search symbol…"></div>
+      <button class="btn ghost" id="portRefresh">↻ Refresh</button>
+    </div>
     <div id="srcBanner"></div>
     <div class="stats" id="portStats"></div>
-    <div style="overflow-x:auto"><table id="portTable"></table></div>
-    <button class="btn" id="portRefresh" style="margin-top:16px">Refresh</button>
+    <div class="grid2">
+      <div class="chart-card">
+        <div class="chart-title"><span class="dot" style="background:var(--s1)"></span> Allocation</div>
+        <canvas id="portAllocChart" height="180"></canvas>
+        <div class="legend" id="portAllocLegend"></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title"><span class="dot" style="background:var(--good)"></span> P&L</div>
+        <canvas id="portPnlChart" height="180"></canvas>
+      </div>
+    </div>
+    <div class="table-wrap" style="margin-top:14px"><table id="portTable"></table></div>
   </div>
 
   <div class="card" id="sellAllCard">
@@ -267,9 +313,17 @@ document.documentElement.dataset.themeChoice=s;})();
   </div>
 
   <div class="card">
-    <h2>Pichhle runs</h2>
+    <div style="display:flex;align-items:center;gap:12px">
+      <h2 style="margin:0">Pichhle runs</h2>
+      <div class="spacer"></div>
+      <button class="btn ghost" id="runsRefreshBtn">↻</button>
+    </div>
     <div class="sub">Har plan aur execution ka record.</div>
-    <div style="overflow-x:auto"><table id="runsTable"></table></div>
+    <div class="chart-card">
+      <div class="chart-title"><span class="dot" style="background:var(--s7)"></span> NAV History</div>
+      <canvas id="navChart" height="120"></canvas>
+    </div>
+    <div class="table-wrap" style="margin-top:14px"><table id="runsTable"></table></div>
   </div>
 </section>
 
@@ -355,6 +409,15 @@ document.documentElement.dataset.themeChoice=s;})();
 </section>
 
 </main>
-<script src="/static/app.js?v=2"></script>
+
+<div id="toastWrap"></div>
+<div id="cmdHint" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--surface);padding:8px 14px;border-radius:999px;font:600 12px/1 'Inter',sans-serif;opacity:.9;box-shadow:var(--shadow-lg);display:flex;gap:14px;align-items:center;z-index:99">
+  <span>⌘K</span><span style="opacity:.6">Quick switch</span>
+  <span style="opacity:.3">·</span>
+  <span>G then H</span><span style="opacity:.6">Home</span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="/static/app.js?v=3"></script>
 </body>
 </html>
