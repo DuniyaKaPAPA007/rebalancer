@@ -298,6 +298,56 @@ document.documentElement.dataset.themeChoice=s;})();
     <div class="table-wrap" style="margin-top:14px"><table id="portTable"></table></div>
   </div>
 
+  <div class="card" id="navTrackCard">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <h2 style="margin:0">NAV Tracking — Zerodha jaisa</h2>
+      <span class="tag keep">REAL — no fake</span>
+      <div class="spacer"></div>
+      <div class="modesw" id="navTfSw">
+        <button data-tf="daily" class="on">Daily</button>
+        <button data-tf="weekly">Weekly</button>
+      </div>
+    </div>
+    <div class="sub">Har refresh pe NAV = holdings value + free cash (Dhan se 100% real) save hota hai. EMA se portfolio return trend track karo — Zerodha Console jaisa.</div>
+    <div class="chart-card">
+      <div class="chart-title"><span class="dot" style="background:var(--s1)"></span> NAV History <span class="muted" id="navRangeLabel" style="font-weight:400;font-size:12px"></span></div>
+      <canvas id="navTrackChart" height="160"></canvas>
+      <div class="legend" id="emaLegend"></div>
+    </div>
+    <div class="row" style="margin-top:14px;gap:8px;flex-wrap:wrap">
+      <div class="modesw" id="emaPreset">
+        <button data-p="10">EMA 10</button>
+        <button data-p="20">EMA 20</button>
+        <button data-p="50">EMA 50</button>
+      </div>
+      <input type="text" id="emaCustom" inputmode="numeric" placeholder="Custom period" style="width:130px">
+      <select id="emaTf" style="border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:10px 12px;font:600 13px Inter">
+        <option value="daily">Daily EMA</option>
+        <option value="weekly">Weekly EMA</option>
+      </select>
+      <button class="btn" id="emaAddBtn">+ Add EMA</button>
+      <button class="btn ghost" id="emaClearBtn">Clear</button>
+    </div>
+    <div id="emaList" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap"></div>
+    <div class="muted" style="margin-top:8px;font-size:12px">EMA = 2/(period+1) weighted — customizable, add/remove kar sakte ho. Weekly = Friday close resampled.</div>
+  </div>
+
+  <div class="card" id="fundFlowCard">
+    <h2>Fund Flows — Deposit / Withdraw</h2>
+    <div class="sub">Zerodha jaisa: Withdraw kiya toh NAV History me -₹ dikhega, Deposit +₹. Dhan ka real cash bhi kam/jyada hoga — app sirf track karti hai (no fake).</div>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <select id="flowType" style="border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:11px 12px;font:600 13px Inter">
+        <option value="WITHDRAW">Withdraw (₹ nikala)</option>
+        <option value="DEPOSIT">Deposit (₹ dala)</option>
+      </select>
+      <input type="text" id="flowAmt" inputmode="numeric" placeholder="Amount ₹" style="width:160px">
+      <input type="text" id="flowNote" placeholder="Note (optional)" style="flex:1;min-width:160px">
+      <button class="btn primary" id="flowAddBtn">Add</button>
+    </div>
+    <div id="flowMsg" style="margin-top:10px"></div>
+    <div class="table-wrap" style="margin-top:14px"><table id="flowTable"></table></div>
+  </div>
+
   <div class="card" id="sellAllCard">
     <h2 style="color:var(--critical)">Sab bech do</h2>
     <div class="sub">Poora portfolio ek saath cash mein. Watchlist ki zarurat nahi.</div>
