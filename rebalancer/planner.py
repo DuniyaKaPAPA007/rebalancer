@@ -184,6 +184,87 @@ def resolve_deploy(p_cfg: Mapping, nav: float) -> tuple[float, str]:
     return nav, "poori capital"
 
 
+def min_capital_for_targets(targets: list[str], ltp: dict, cfg: dict) -> dict:
+    """
+    Minimum kitna paisa chahiye taaki top-n me har stock me kam se kam 1 valid BUY ban sake?
+    Har stock ka price alag hai, aur min_trade = max(500, slice*0.03).
+    Cheap stock (13.94) ko 500 ke liye 36 share chahiye, expensive (3118) ko 1 share kaafi.
+    Returns {min_slice, min_investable, min_nav, per_stock: [{symbol, price, min_qty, min_value}]}
+    """
+    p_cfg = cfg.get("portfolio", {})
+    c_cfg = cfg.get("costs", {})
+    try:
+        min_trade_val = float(c_cfg.get("min_trade_value_inr", 500) or 500)
+    except:
+        min_trade_val = 500
+    try:
+        min_trade_pct = float(c_cfg.get("min_trade_pct_of_slice", 0.03) or 0.03)
+    except:
+        min_trade_pct = 0.03
+    try:
+        cash_reserve = float(p_cfg.get("cash_reserve_pct", 0.01) or 0.01)
+    except:
+        cash_reserve = 0.01
+    if cash_reserve >= 0.5 or cash_reserve <0:
+        cash_reserve = 0.01
+    n = len(targets) if targets else 1
+    per = []
+    max_slice_needed = 0
+    for sym in targets:
+        price = float(ltp.get(sym, 0) or 0)
+        if price <=0 or price!=price or math.isinf(price):
+            # unknown price -> assume 100
+            price = 100
+        # brute force minimal slice that yields valid qty
+        # Since slice up to maybe 50000, search increment price? Use formula
+        # Need qty = floor(slice/price) >=1 and qty*price >= max(500, slice*0.03)
+        # For cheap price, need qty*price >=500 => qty >= ceil(500/price)
+        # So slice >= ceil(500/price)*price
+        if price >= min_trade_val:
+            need_slice = price  # 1 share enough
+        else:
+            # need ceil(500/price) shares
+            qty_need = math.ceil(min_trade_val / price)
+            need_slice = qty_need * price
+        # also need to satisfy slice*0.03 <= qty*price, but for need_slice, qty= floor(need_slice/price) = qty_need, value = need_slice, so need need_slice*0.03 <= need_slice => always true since 0.03<1
+        # For larger slice, also true. So minimal is price or ceil(500/price)*price
+        # But to be safe, verify with 3% rule for that slice: if need_slice*0.03 > need_slice? impossible. So fine.
+        # However if price is 1000, need_slice=1000, 3% =30, value 1000>=30 ok
+        # So we keep need_slice
+        # Also consider that slice may need to be slightly higher to make floor(slice/price)*price >= slice*0.03 for expensive? Let's brute check few steps
+        # Do brute for 0-5*price window to find minimal valid
+        found = None
+        for test in [need_slice, need_slice+price, need_slice+price*2]:
+            q = math.floor(test / price)
+            val = q*price
+            mt = max(min_trade_val, test*min_trade_pct)
+            if q>=1 and val >= mt - 1e-6:
+                found = test
+                break
+        if found is not None:
+            need_slice = found
+        per.append({"symbol": sym, "price": price, "min_qty": math.ceil(need_slice/price) if price>0 else 1, "min_slice": need_slice, "min_value": math.ceil(need_slice/price)*price if price>0 else need_slice})
+        if need_slice > max_slice_needed:
+            max_slice_needed = need_slice
+    min_slice = max_slice_needed
+    min_investable = min_slice * n
+    # NAV = investable / (1 - cash_reserve) + small buffer for costs (0.2%)
+    try:
+        min_nav = min_investable / (1 - cash_reserve) * 1.002  # 0.2% cost buffer
+    except:
+        min_nav = min_investable * 1.02
+    # also compute with deploy mode? For now assume deploy all
+    return {
+        "min_slice": round(min_slice,2),
+        "min_investable": round(min_investable,2),
+        "min_nav": round(min_nav,2),
+        "per_stock": per,
+        "n": n,
+        "cash_reserve_pct": cash_reserve,
+        "min_trade_val": min_trade_val,
+        "min_trade_pct": min_trade_pct
+    }
+
 # Statutory rates -- ye sarkar/exchange badalte rehte hain. Config mein
 # override kar sakte ho (costs.rates), warna ye default use hote hain.
 # Aakhri baar verify: Aug 2026, equity DELIVERY ke liye.

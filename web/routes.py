@@ -691,6 +691,31 @@ def register_routes(app: FastAPI) -> None:
                           watchlist=wl, ltp=ltp, security_ids=security_ids,
                           cfg=cfg, circuit=circuit)
         plan.warnings = pre + plan.warnings
+        # ---- minimum capital check ----
+        try:
+            from rebalancer.planner import min_capital_for_targets
+            targets_for_min = [t.symbol for t in sorted(wl, key=lambda x: x.rank)[:resolve_n(cfg["portfolio"], len(wl))]]
+            min_req = min_capital_for_targets(targets_for_min, ltp, cfg)
+            # compare allocated investable vs required
+            # plan.target_equity is investable after deploy+reserve; for min we consider NAV
+            # Warn if allocated less than min
+            allocated = plan.target_equity
+            need = min_req["min_investable"]
+            if allocated < need - 1:
+                plan.warnings.append(
+                    f"CAPITAL KAM HAI: Top {len(targets_for_min)} stocks me har ek me kam se kam 1 valid order (₹{min_req['min_trade_val']:.0f}) ke liye "
+                    f"kam se kam slice ₹{min_req['min_slice']:,.0f} chahiye → total ₹{need:,.0f} stocks me + reserve. "
+                    f"Aapne sirf ₹{allocated:,.0f} allocate kiya (NAV ₹{plan.nav:,.0f} me se). Isiliye {len(targets_for_min) - len([o for o in plan.orders if o.side==Side.BUY])} stocks me paisa nahi laga (8/10 jaisa). "
+                    f"Minimum NAV chahiye ₹{min_req['min_nav']:,.0f}. Deploy % badhao ya capital badhao. Details: " +
+                    ", ".join([f"{p['symbol']} ₹{p['price']:.0f}×{p['min_qty']} = ₹{p['min_value']:.0f}" for p in min_req["per_stock"][:3]]) + ("..." if len(min_req["per_stock"])>3 else "")
+                )
+            # attach to plan for API
+            plan._min_required = min_req  # type: ignore
+        except Exception as e:
+            # never fail plan due to min calc
+            import logging as _lg
+            _lg.getLogger("web").debug("min capital calc fail: %s", e)
+            plan._min_required = None  # type: ignore
         STATE["plan"] = plan
 
         db = Store(str(ROOT / cfg["paths"]["db"]))
@@ -715,6 +740,11 @@ def register_routes(app: FastAPI) -> None:
                                else "Dhan API se live")
         d["holdings_value"] = plan.nav - plan.free_cash
         d["price_source"] = pinfo
+        d["min_required"] = getattr(plan, "_min_required", None)
+        # also expose for frontend easier: allocated vs required
+        if d["min_required"]:
+            d["min_required"]["allocated_investable"] = plan.target_equity
+            d["min_required"]["allocated_nav"] = plan.nav
         return d
 
     @app.post("/api/plan/sell-all")
