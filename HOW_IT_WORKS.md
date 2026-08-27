@@ -67,6 +67,13 @@ Trendlyne CSV (25 rows)
 8. **Overflow `n+1`:** `ov_room = investable - tgt_val_after` (up to cap), `held_val` ka buy-cost nahi lagta — `need = target - held`, `buy_qty = floor(need / price*(1+cost))` (pehle pura target ko cost se divide karke under-buy hota tha).
 9. **`_net_opposing`:** same symbol pe `BUY 500 + SELL 200` → `net BUY 300` ek order, STCG/charges bachao; dust net BUY `<min_trade` skip, net SELL warn.
 10. **Warnings:** allocation adhura (`buys < slots` + skipped list + `S.No`), concentration (`>25%` → cap suggest), pricest slice `<15 shares` precision, stale LTP `>5%`, microcap `<2000cr`, narrow band `<=10%`, liquidity `>1%` traded value.
+11. **Minimum Capital `min_capital_for_targets()` — 8/10 ka fix:**
+    * Har top-n ka `price` dekho: `JSWDULUX 3118` → 1 share ke liye `3118`, `IDEA 13.94` → `₹500` ke liye `36 share = 501`
+    * `min_slice = max(price_i if price>=500 else ceil(500/price)*price)` → cheap stock decide karta hai
+    * Golden Cross top10: `min_slice=3118`, `min_investable=31188`, `min_nav≈31566` (1% reserve + 0.2% cost)
+    * Plan ke baad `allocated = target_equity` vs `need` compare → `allocated < need` → warning:
+      `CAPITAL KAM HAI: Top 10 me har ek me 1 valid order (₹500) ke liye min slice ₹3,118 → total ₹31,188 + reserve. Aapne ₹10k allocate kiya → 2 miss (8/10). Min NAV ₹31,566 chahiye.`
+    * Web `Plan` tab me `Stats` me `Minimum NAV` + `Min / stock` + `CAPITAL KAM / kaafi` banner + per-stock `CHENNPETRO 1393×1...` detail, `S.No` se kaunsa chhuta clear.
 
 **Risk gates `_apply_risk_gates` (penny pehle, phir cap):**
 * `max_single_order_value 20L` → BLOCKED + suggest

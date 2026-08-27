@@ -440,7 +440,8 @@ function renderPlan() {
                 buys.filter(o => o.reason === "TOPUP").length;
 
   const wpct = p.nav ? (p.slice_value / p.nav * 100) : 0;
-  $("#planStats").innerHTML = [
+  const mr = p.min_required;
+  let stats = [
     ["NAV", inr(p.nav), esc(p.capital_source || "portfolio + cash")],
     ["Slots", `${p.slots}`, `${p.list_len} naam mein se` + (p.auto ? " (auto)" : "")],
     ["Har stock", inr(p.slice_value), `${wpct.toFixed(wpct < 1 ? 2 : 1)}% each`],
@@ -451,8 +452,31 @@ function renderPlan() {
     ["Kharidna", inr(bv), `${buys.length} orders`, "buy"],
     ["Rakhe ja rahe", keeps, "bina beche adjust"],
     ["Churn", (p.churn_pct * 100).toFixed(1) + "%", "NAV ka kitna bika"],
-  ].map(([k, v, m, cls]) =>
+  ];
+  if (mr) {
+    const need = mr.min_nav || mr.min_investable;
+    const allocated = mr.allocated_nav || p.nav;
+    const ok = allocated >= need - 1;
+    stats.push(["Minimum NAV", inr(need), ok ? "✅ aapka NAV kaafi hai" : `⚠️ kam hai — ${inr(need - allocated)} aur chahiye` ]);
+    stats.push(["Min / stock", inr(mr.min_slice), `har stock me ≥${mr.min_slice ? Math.ceil(mr.min_slice) : ""} (₹${mr.min_trade_val} min)` ]);
+  }
+  $("#planStats").innerHTML = stats.map(([k, v, m, cls]) =>
     `<div class="stat ${cls || ""}"><div class="k">${k}</div><div class="v num">${v}</div><div class="m">${m}</div></div>`).join("");
+
+  // Minimum capital banner - always show, highlight if allocated < required
+  if (mr) {
+    const needNav = mr.min_nav;
+    const needInv = mr.min_investable;
+    const alloc = mr.allocated_investable;
+    const per = mr.per_stock || [];
+    const details = per.slice(0,5).map(x=>`${esc(x.symbol)} ₹${Math.round(x.price).toLocaleString('en-IN')}×${x.min_qty}=₹${Math.round(x.min_value).toLocaleString('en-IN')}`).join(', ') + (per.length>5?' ...':'');
+    const short = alloc < needInv -1
+      ? banner("block", "✕", `<b>Capital kam hai!</b> Top ${mr.n} stocks me har ek me kam se kam 1 valid order (₹${mr.min_trade_val} min) ke liye <b>kam se kam ${inr(needInv)} stocks me + reserve = NAV ${inr(needNav)}</b> chahiye.<br>`
+        + `Aapne sirf <b>${inr(alloc)} stocks me / NAV ${inr(p.nav)}</b> allocate kiya — isiliye <b>${mr.n - buys.length} stocks me paisa nahi laga (8/10 jaisa)</b>.<br>`
+        + `<span class="muted">Per-stock min: ${details}. Deploy % badhao ya capital badhao ya n kam karo.</span>`)
+      : banner("good", "✓", `<b>Capital kaafi hai.</b> Top ${mr.n} stocks ke liye minimum <b>${inr(needInv)} stocks me / NAV ${inr(needNav)}</b> chahiye, aapke paas <b>${inr(alloc)} / ${inr(p.nav)}</b> hai — sab ${mr.n} buy banenge (S.No 1-${mr.n}).<br><span class="muted">Per-stock: ${details}</span>`);
+    $("#planBanners").innerHTML += short;
+  }
 
   const LBL = { EXIT:"OUT", ENTRY:"NEW", TOPUP:"ADD", TRIM:"TRIM",
                 OVERFLOW:"n+1", OVERFLOW_TRIM:"n+1 trim" };

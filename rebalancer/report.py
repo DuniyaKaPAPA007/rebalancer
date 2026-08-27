@@ -89,6 +89,22 @@ def render(plan: Plan, cfg: Mapping) -> str:
         L.append(f"  Is rate par saal bhar mein ~{e.total * 52 / plan.nav * 100:.1f}% "
                  f"NAV sirf charges mein jaayegi (slippage aur STCG alag).")
     L.append("")
+    # Minimum capital
+    mr = getattr(plan, "_min_required", None)
+    if mr:
+        L.append(f"  MINIMUM CAPITAL (har stock me 1 valid order >=Rs.{mr['min_trade_val']:.0f}):")
+        L.append(f"    Slice min Rs.{_inr(mr['min_slice']):>10} each  -> Investable Rs.{_inr(mr['min_investable']):>10} -> NAV Rs.{_inr(mr['min_nav']):>10}")
+        if plan.nav < mr['min_nav'] - 1:
+            miss = mr['n'] - len(plan.buys)
+            L.append(f"    CAPITAL KAM: Aapka NAV Rs.{_inr(plan.nav)} < min Rs.{_inr(mr['min_nav'])} -> {miss} stocks miss (8/10 jaisa)")
+        else:
+            L.append(f"    Capital kaafi hai: NAV Rs.{_inr(plan.nav)} >= min Rs.{_inr(mr['min_nav'])} -> sab {mr['n']} buy banenge")
+        # per-stock detail up to 3
+        for ps in mr['per_stock'][:3]:
+            L.append(f"      {ps['symbol']:<14} price {ps['price']:>8,.2f} x{ps['min_qty']:>3} = Rs.{_inr(ps['min_value']):>8}")
+        if len(mr['per_stock'])>3:
+            L.append(f"      ... +{len(mr['per_stock'])-3} more")
+        L.append("")
 
     if plan.skipped:
         L.append("  SKIPPED")

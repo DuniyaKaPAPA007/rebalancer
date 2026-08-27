@@ -120,6 +120,20 @@ def cmd_plan(args) -> int:
                       watchlist=watchlist, ltp=ltp, security_ids=security_ids,
                       cfg=cfg, circuit=circuit)
     plan.warnings = pre_warnings + plan.warnings
+    # minimum capital attach for report
+    try:
+        from .planner import min_capital_for_targets, resolve_n
+        targets_for_min = [t.symbol for t in sorted(watchlist, key=lambda x: x.rank)[:resolve_n(cfg["portfolio"], len(watchlist))]]
+        mr = min_capital_for_targets(targets_for_min, ltp, cfg)
+        allocated = getattr(plan, "target_equity", 0)
+        if allocated < mr["min_investable"] - 1:
+            plan.warnings.append(
+                f"CAPITAL KAM HAI: Top {len(targets_for_min)} stocks me har ek me kam se kam 1 valid order (₹{mr['min_trade_val']:.0f}) ke liye kam se kam slice ₹{mr['min_slice']:,.0f} chahiye → total ₹{mr['min_investable']:,.0f} stocks me + reserve. Aapne sirf ₹{allocated:,.0f} allocate kiya. Minimum NAV ₹{mr['min_nav']:,.0f} chahiye."
+            )
+        plan._min_required = mr  # type: ignore
+    except Exception as _e:
+        import logging as _lg2
+        _lg2.getLogger("rebalancer").debug("min capital calc fail cli: %s", _e)
 
     db.save_run(run_id, datetime.now(IST).isoformat(timespec="seconds"),
                 "BLOCKED" if plan.blockers else "PLANNED",
