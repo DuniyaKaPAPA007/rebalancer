@@ -257,7 +257,7 @@ async function upload(file) {
       <td>${tag}</td></tr>`;
   }).join("");
   $("#wlTable").innerHTML =
-    `<thead><tr><th>#</th><th class="l">Symbol</th><th class="l">Naam</th><th>LTP</th><th>Mkt cap</th><th>Slot</th></tr></thead><tbody>${rows}</tbody>`;
+    `<thead><tr><th>S.No</th><th class="l">Symbol</th><th class="l">Naam</th><th>LTP</th><th>Mkt cap</th><th>Slot</th></tr></thead><tbody>${rows}</tbody>`;
   $("#wlSub").innerHTML = `${esc(WL.filename)} — ${WL.count} naam` +
     (WL.format === "backtest"
       ? ` <span class="tag OVERFLOW">BACKTEST</span> period ${esc(WL.period)}`
@@ -666,12 +666,12 @@ function renderPlan() {
 
   const c = p.costs || {};
   const money = v => inr(v || 0);
-  $("#costTable").innerHTML = `<tbody>
-    <tr><td class="l">STT (0.1% dono taraf)</td><td class="num">${money(c.stt)}</td></tr>
-    <tr><td class="l">DP charges (har sell scrip)</td><td class="num">${money(c.dp_charges)}</td></tr>
-    <tr><td class="l">Stamp + txn + SEBI + GST</td><td class="num">${money((c.stamp_duty||0)+(c.txn_charges||0)+(c.sebi_fees||0)+(c.gst||0))}</td></tr>
-    <tr><td class="l">Brokerage (Dhan delivery = 0)</td><td class="num">${money(c.brokerage)}</td></tr>
-    </tbody><tfoot><tr><td class="l">Total — is baar</td><td class="num">${money(c.total)}${p.nav ? ` <span class="muted">(${((c.total || 0) / p.nav * 100).toFixed(2)}% of NAV)</span>` : ""}</td></tr></tfoot>`;
+  $("#costTable").innerHTML = `<thead><tr><th>S.No</th><th class="l">Kharcha</th><th>Amount</th></tr></thead><tbody>
+    <tr><td class="num">1</td><td class="l">STT (0.1% dono taraf)</td><td class="num">${money(c.stt)}</td></tr>
+    <tr><td class="num">2</td><td class="l">DP charges (har sell scrip)</td><td class="num">${money(c.dp_charges)}</td></tr>
+    <tr><td class="num">3</td><td class="l">Stamp + txn + SEBI + GST</td><td class="num">${money((c.stamp_duty||0)+(c.txn_charges||0)+(c.sebi_fees||0)+(c.gst||0))}</td></tr>
+    <tr><td class="num">4</td><td class="l">Brokerage (Dhan delivery = 0)</td><td class="num">${money(c.brokerage)}</td></tr>
+    </tbody><tfoot><tr><td></td><td class="l">Total — is baar</td><td class="num">${money(c.total)}${p.nav ? ` <span class="muted">(${((c.total || 0) / p.nav * 100).toFixed(2)}% of NAV)</span>` : ""}</td></tr></tfoot>`;
   const an = c.annual;
   if (an) {
     const hot = an.pct_of_nav >= 3;
@@ -839,8 +839,9 @@ async function loadPortfolio() {
   }
 
   $("#portTable").innerHTML =
-    `<thead><tr><th class="l">Symbol</th><th>Qty</th><th>Bech sakte</th><th>Avg</th><th>LTP</th><th>Value</th><th>P&L</th><th>Weight</th></tr></thead><tbody>` +
-    (d.holdings.length ? d.holdings.map(h => `<tr>
+    `<thead><tr><th>S.No</th><th class="l">Symbol</th><th>Qty</th><th>Bech sakte</th><th>Avg</th><th>LTP</th><th>Value</th><th>P&L</th><th>Weight</th></tr></thead><tbody>` +
+    (d.holdings.length ? d.holdings.map((h, idx) => `<tr>
+      <td class="num">${idx+1}</td>
       <td class="l sym">${esc(h.symbol)}</td>
       <td class="num">${h.qty.toLocaleString("en-IN")}</td>
       <td class="num">${h.available.toLocaleString("en-IN")}${h.available < h.qty ? ' <span class="tag gray">T+1</span>' : ""}</td>
@@ -848,16 +849,16 @@ async function loadPortfolio() {
       <td class="num"><b>${inr(h.value)}</b></td>
       <td class="num ${h.pnl >= 0 ? "pos" : "neg"}">${inr(h.pnl)} <span class="muted">(${h.pnl_pct >= 0 ? "+" : ""}${h.pnl_pct.toFixed(1)}%)</span></td>
       <td class="num">${h.weight.toFixed(1)}% <span class="wbar"><i style="width:${Math.min(h.weight * 2.5, 100)}%"></i></span></td></tr>`).join("")
-      : `<tr><td colspan="8" class="l muted" style="padding:18px 10px">Koi holding nahi.</td></tr>`) + `</tbody>`;
+      : `<tr><td colspan="9" class="l muted" style="padding:18px 10px">Koi holding nahi.</td></tr>`) + `</tbody>`;
 
   try {
     const r = await api("/api/runs");
-    $("#runsTable").innerHTML = `<thead><tr><th class="l">Run</th><th class="l">Kab</th><th class="l">Status</th><th>NAV</th></tr></thead><tbody>` +
-      (r.runs.length ? r.runs.map(x => `<tr><td class="l sym">${esc(x.run_id)}</td>
+    $("#runsTable").innerHTML = `<thead><tr><th>S.No</th><th class="l">Run</th><th class="l">Kab</th><th class="l">Status</th><th>NAV</th></tr></thead><tbody>` +
+      (r.runs.length ? r.runs.map((x, idx) => `<tr><td class="num">${idx+1}</td><td class="l sym">${esc(x.run_id)}</td>
         <td class="l muted">${esc((x.created_at || "").replace("T", " ").slice(0, 16))}</td>
         <td class="l"><span class="tag ${x.status === "DONE" ? "keep" : x.status === "BLOCKED" ? "OUT" : "gray"}">${esc(x.status)}</span></td>
         <td class="num">${inr(x.nav)}</td></tr>`).join("")
-        : `<tr><td colspan="4" class="l muted" style="padding:18px 10px">Abhi koi run nahi hua.</td></tr>`) + `</tbody>`;
+        : `<tr><td colspan="5" class="l muted" style="padding:18px 10px">Abhi koi run nahi hua.</td></tr>`) + `</tbody>`;
     // NAV history line chart
     try{
       if(r.runs && r.runs.length>1 && window.Chart){
@@ -941,8 +942,8 @@ async function loadConfig() {
     allowed_window: "Rebalance ka time window (IST)",
   };
   const sec = (title, obj) => `<h3 style="font-size:14px;margin:20px 0 8px;color:var(--ink2)">${title}</h3>
-    <table><tbody>` + Object.entries(obj).map(([k, v]) =>
-    `<tr><td class="l">${esc(labels[k] || k)}<div class="muted" style="font-size:11.5px">${esc(k)}</div></td>
+    <table><thead><tr><th>S.No</th><th class="l">Setting</th><th>Value</th></tr></thead><tbody>` + Object.entries(obj).map(([k, v], idx) =>
+    `<tr><td class="num">${idx+1}</td><td class="l">${esc(labels[k] || k)}<div class="muted" style="font-size:11.5px">${esc(k)}</div></td>
      <td class="num"><b>${esc(Array.isArray(v) ? v.join(" – ") : (v === null ? "off" : v))}</b></td></tr>`).join("") + `</tbody></table>`;
   $("#cfgOut").innerHTML = sec("Portfolio", c.portfolio) + sec("Risk guards", c.risk) + sec("Costs", c.costs) + sec("Execution", c.execution);
 }
@@ -1095,8 +1096,8 @@ $("#pxTestBtn").onclick = async () => {
     const r = await api("/api/prices/test", { method: "POST" });
     let h = "";
     for (const s of r.results) {
-      const rows = (s.sample || []).map(x =>
-        `<tr><td class="l sym">${esc(x.symbol)}</td><td class="num">${inr(x.ltp, 2)}</td>` +
+      const rows = (s.sample || []).map((x, idx) =>
+        `<tr><td class="num">${idx+1}</td><td class="l sym">${esc(x.symbol)}</td><td class="num">${inr(x.ltp, 2)}</td>` +
         `<td class="num">${x.volume ? x.volume.toLocaleString("en-IN") : "--"}</td>` +
         `<td>${x.circuit ? '<span class="tag keep">haan</span>' : '<span class="tag gray">nahi</span>'}</td></tr>`).join("");
       h += banner(s.ok ? "good" : "block", s.ok ? "\u2713" : "\u2715",
@@ -1104,7 +1105,7 @@ $("#pxTestBtn").onclick = async () => {
         (s.ok && s.age_min != null ? `<br>Price <b>${s.age_min} minute</b> purana hai.` : "") +
         (s.ok && s.age_min == null ? `<br><span class="muted">Price kitna purana hai, ye source nahi batata.</span>` : "") +
         (s.ok && s.circuits === 0 ? `<br><span class="muted">Circuit limits nahi milte is source se.</span>` : "") +
-        (rows ? `<table style="margin-top:10px"><thead><tr><th class="l">Symbol</th><th>LTP</th><th>Volume</th><th>Circuit</th></tr></thead><tbody>${rows}</tbody></table>` : ""));
+        (rows ? `<table style="margin-top:10px"><thead><tr><th>S.No</th><th class="l">Symbol</th><th>LTP</th><th>Volume</th><th>Circuit</th></tr></thead><tbody>${rows}</tbody></table>` : ""));
     }
     if (!r.any_ok)
       h += banner("warn", "!", `<b>Koi bhi free source nahi chala.</b> Aise mein Dhan ka Data API hi ekmatra rasta hai, ya <code>config.yaml</code> mein <code>prices.fallback</code> badal kar dekho.`);
