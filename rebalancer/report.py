@@ -130,10 +130,10 @@ def render_reconciliation(rec: dict) -> str:
     if "positions" not in rec:
         return f"  Reconciliation: {rec}"
     L = ["", "  POST-RUN PORTFOLIO", f"  NAV Rs. {_inr(rec['nav'])}", ""]
-    L.append(f"  {'SYMBOL':<14}{'QTY':>7} {'VALUE':>13} {'WEIGHT':>9} {'DRIFT':>9}")
-    L.append("  " + "-" * 55)
-    for p in rec["positions"]:
+    L.append(f"  {'S.NO':>4} {'SYMBOL':<14}{'QTY':>7} {'VALUE':>13} {'WEIGHT':>9} {'DRIFT':>9}")
+    L.append("  " + "-" * 60)
+    for idx, p in enumerate(rec["positions"], 1):
         flag = " <-- check" if abs(p["drift_vs_target_pct"]) > 20 else ""
-        L.append(f"  {p['symbol']:<14}{p['qty']:>7} {_inr(p['value']):>13} "
+        L.append(f"  {idx:>4} {p['symbol']:<14}{p['qty']:>7} {_inr(p['value']):>13} "
                  f"{p['weight_pct']:>8.1f}% {p['drift_vs_target_pct']:>+8.1f}%{flag}")
     return "\n".join(L)
