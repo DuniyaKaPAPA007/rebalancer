@@ -32,10 +32,76 @@ async function api(path, opts = {}) {
 function banner(kind, icon, html) {
   return `<div class="banner ${kind}"><span class="bi">${icon}</span><div>${html}</div></div>`;
 }
+function toast(msg, kind="info"){
+  const wrap = $("#toastWrap"); if(!wrap) return;
+  const el = document.createElement("div");
+  el.className = "toast";
+  const icons = {info:"✦", good:"✓", warn:"!", bad:"✕"};
+  el.innerHTML = `<span>${icons[kind]||"✦"}</span><span>${esc(msg)}</span>`;
+  if(kind==="good") el.style.background = "var(--good)";
+  if(kind==="bad") el.style.background = "var(--critical)";
+  if(kind==="warn") el.style.background = "#92400e";
+  wrap.appendChild(el);
+  setTimeout(()=>{ el.style.opacity="0"; el.style.transform="translateY(6px)"; }, 2600);
+  setTimeout(()=> el.remove(), 3000);
+}
 function busy(btn, on, label) {
   btn.disabled = on;
   if (on) { btn.dataset.old = btn.innerHTML; btn.innerHTML = `<span class="spin"></span>${label || "…"}`; }
   else if (btn.dataset.old) btn.innerHTML = btn.dataset.old;
+}
+// --- tiny chart helper (no dependency, fallback if Chart.js missing) ---
+function donutChart(canvasId, labels, values, colors){
+  const c = document.getElementById(canvasId); if(!c) return;
+  const ctx = c.getContext("2d");
+  // try Chart.js if available
+  if(window.Chart){
+    if(c._chart) c._chart.destroy();
+    c._chart = new Chart(ctx, {
+      type:"doughnut",
+      data:{ labels, datasets:[{ data:values, backgroundColor:colors, borderWidth:0, hoverOffset:4 }]},
+      options:{
+        cutout:"62%", plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=> `${ctx.label}: ${inr(ctx.parsed)}` } } },
+        animation:{ duration:400, easing:"easeOutQuart" }
+      }
+    });
+    return;
+  }
+  // fallback: simple SVG donut via canvas arc
+  const total = values.reduce((a,b)=>a+b,0) || 1;
+  const dpr = window.devicePixelRatio||1;
+  const w=c.width=dpr*180, h=c.height=dpr*180;
+  c.style.width="180px"; c.style.height="180px";
+  ctx.clearRect(0,0,w,h); ctx.save(); ctx.scale(dpr,dpr);
+  let ang=-Math.PI/2;
+  const cx=90,cy=90,r=70, r2=42;
+  labels.forEach((_,i)=>{
+    const v=values[i]; const a= v/total* Math.PI*2;
+    ctx.beginPath(); ctx.moveTo(cx,cy); ctx.arc(cx,cy,r,ang,ang+a); ctx.closePath();
+    ctx.fillStyle=colors[i%colors.length]; ctx.fill();
+    ang+=a;
+  });
+  // hole
+  ctx.globalCompositeOperation="destination-out";
+  ctx.beginPath(); ctx.arc(cx,cy,r2,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function barSpark(canvasId, labels, values, color){
+  const c=document.getElementById(canvasId); if(!c) return;
+  const ctx=c.getContext("2d");
+  if(window.Chart){
+    if(c._chart) c._chart.destroy();
+    c._chart = new Chart(ctx, {
+      type:"bar",
+      data:{ labels, datasets:[{ data:values, backgroundColor:color, borderRadius:6, barThickness:14 }]},
+      options:{
+        indexAxis:"y", plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=> `${ctx.label}: ${ctx.parsed.x>0?"+":""}${inr(ctx.parsed.x)}` } } },
+        scales:{ x:{ grid:{color:"rgba(148,163,184,.15)"}, ticks:{ callback:(v)=> inr(v) } }, y:{ grid:{display:false} } },
+        animation:{ duration:300 }
+      }
+    });
+    return;
+  }
 }
 
 /* ---------------- tabs ---------------- */
@@ -478,6 +544,77 @@ function renderPlan() {
     $("#planBanners").innerHTML += short;
   }
 
+  // --- charts: allocation + cost ---
+  try{
+    const palette = ["#2563eb","#7c3aed","#059669","#ea580c","#0ea5e9","#eab308","#f43f5e","#14b8a6","#f97316","#8b5cf6","#6366f1","#10b981"];
+    const allocLabels = buys.map(o=>o.symbol);
+    const allocVals = buys.map(o=>o.value);
+    if(allocVals.length){
+      donutChart("allocChart", allocLabels, allocVals, palette.slice(0, allocLabels.length));
+      $("#allocLegend").innerHTML = allocLabels.map((l,i)=>`<span><i style="background:${palette[i%palette.length]}"></i>${esc(l)} ${inr(allocVals[i])}</span>`).join("");
+    } else {
+      $("#allocLegend").innerHTML = `<span class="muted">Koi BUY nahi — allocation chart nahi</span>`;
+    }
+    const c = p.costs||{};
+    const costVals = [c.stt||0, c.dp_charges||0, (c.stamp_duty||0)+(c.txn_charges||0)+(c.sebi_fees||0)+(c.gst||0)];
+    if(costVals.reduce((a,b)=>a+b,0)>1){
+      donutChart("costChart", ["STT","DP","Other"], costVals, ["#ef4444","#f59e0b","#64748b"]);
+      $("#costHint").textContent = "STT sabse bada hissa — churn kam karo toh bachega";
+    } else {
+      $("#costHint").textContent = "";
+    }
+  }catch(e){ /* chart optional */ }
+
+  // table search + copy handlers (attach once)
+  const hookSearch = (inputId, tableId) => {
+    const inp = document.getElementById(inputId);
+    if(!inp || inp._hooked) return;
+    inp._hooked=true;
+    inp.addEventListener("input", ()=>{
+      const q = inp.value.trim().toLowerCase();
+      const rows = document.querySelectorAll(`#${tableId} tbody tr`);
+      rows.forEach(tr=>{
+        const txt = tr.textContent.toLowerCase();
+        tr.style.display = !q || txt.includes(q) ? "" : "none";
+      });
+    });
+  };
+  hookSearch("sellSearch","sellTable");
+  hookSearch("buySearch","buyTable");
+  hookSearch("portSearch","portTable");
+  const hookCopy = (btnId, tableId) => {
+    const b=document.getElementById(btnId);
+    if(!b || b._hooked) return;
+    b._hooked=true;
+    b.onclick=()=>{
+      const t=document.getElementById(tableId);
+      if(!t) return;
+      const txt = Array.from(t.querySelectorAll("tr")).map(tr=> Array.from(tr.cells).map(td=>td.textContent.trim()).join("\t")).join("\n");
+      navigator.clipboard.writeText(txt).then(()=>toast("Copied ✓","good")).catch(()=>toast("Copy fail","bad"));
+    };
+  };
+  hookCopy("sellCopyBtn","sellTable");
+  hookCopy("buyCopyBtn","buyTable");
+  // export handlers
+  const doExport = (type) => {
+    if(!PLAN) return;
+    if(type==="csv"){
+      const rows = [["Side","Symbol","Qty","Price","Limit","Value","Reason","Note"]];
+      PLAN.orders.forEach(o=> rows.push([o.side,o.symbol,o.qty,o.ref_price,o.limit_price,o.value,o.reason,o.note]));
+      const csv = rows.map(r=> r.map(v=> `"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+      const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"})); a.download=`plan-${PLAN.run_id}.csv`; a.click();
+      toast("CSV downloaded","good");
+    } else {
+      const j = JSON.stringify(PLAN,null,2);
+      const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([j],{type:"application/json"})); a.download=`plan-${PLAN.run_id}.json`; a.click();
+      toast("JSON downloaded","good");
+    }
+  };
+  const eb=document.getElementById("exportBtn");
+  const ej=document.getElementById("exportJsonBtn");
+  if(eb && !eb._hooked){ eb._hooked=true; eb.onclick=()=>doExport("csv"); }
+  if(ej && !ej._hooked){ ej._hooked=true; ej.onclick=()=>doExport("json"); }
+
   const LBL = { EXIT:"OUT", ENTRY:"NEW", TOPUP:"ADD", TRIM:"TRIM",
                 OVERFLOW:"n+1", OVERFLOW_TRIM:"n+1 trim" };
   const rowsFor = list => list.length ? list.map((o, idx) => {
@@ -659,6 +796,48 @@ async function loadPortfolio() {
   ].map(([k, v, m], i) =>
     `<div class="stat"><div class="k">${k}</div><div class="v num" ${i === 3 ? `style="color:${pnl >= 0 ? "var(--good)" : "var(--sell)"}"` : ""}>${v}</div><div class="m">${m}</div></div>`).join("");
 
+  // Portfolio charts — allocation donut + P&L bar
+  try{
+    const palette = ["#2563eb","#7c3aed","#059669","#ea580c","#0ea5e9","#eab308","#f43f5e","#14b8a6","#6366f1","#f97316","#10b981","#84cc16"];
+    if(d.holdings.length){
+      const labs = d.holdings.map(h=>h.symbol);
+      const vals = d.holdings.map(h=>h.value);
+      donutChart("portAllocChart", labs, vals, palette.slice(0,labs.length));
+      const lg = document.getElementById("portAllocLegend");
+      if(lg) lg.innerHTML = labs.map((l,i)=>`<span><i style="background:${palette[i%palette.length]}"></i>${esc(l)} ${inr(vals[i])}</span>`).join("");
+      const pnlLabs = d.holdings.map(h=>h.symbol);
+      const pnlVals = d.holdings.map(h=>h.pnl);
+      // use bar chart for P&L via canvas
+      const col = pnlVals.map(v=> v>=0 ? "#10b981" : "#ef4444");
+      // simple bar via Chart.js if available - use line bar
+      if(window.Chart){
+        const c=document.getElementById("portPnlChart");
+        if(c){ if(c._chart) c._chart.destroy();
+          c._chart = new Chart(c.getContext("2d"),{
+            type:"bar",
+            data:{ labels:pnlLabs, datasets:[{ data:pnlVals, backgroundColor:col, borderRadius:6 }]},
+            options:{ indexAxis:"y", plugins:{ legend:{display:false}}, scales:{ x:{ grid:{color:"rgba(148,163,184,.12)"}, ticks:{ callback:v=>inr(v)}}, y:{ grid:{display:false}}}, animation:{duration:400}}
+          });
+        }
+      }
+    } else {
+      const lg=document.getElementById("portAllocLegend");
+      if(lg) lg.innerHTML = `<span class="muted">Koi holding nahi</span>`;
+    }
+  }catch(e){}
+
+  // portfolio search hook
+  const ps=document.getElementById("portSearch");
+  if(ps && !ps._hooked){
+    ps._hooked=true;
+    ps.addEventListener("input",()=>{
+      const q=ps.value.trim().toLowerCase();
+      document.querySelectorAll("#portTable tbody tr").forEach(tr=>{
+        tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? "" : "none";
+      });
+    });
+  }
+
   $("#portTable").innerHTML =
     `<thead><tr><th class="l">Symbol</th><th>Qty</th><th>Bech sakte</th><th>Avg</th><th>LTP</th><th>Value</th><th>P&L</th><th>Weight</th></tr></thead><tbody>` +
     (d.holdings.length ? d.holdings.map(h => `<tr>
@@ -679,6 +858,27 @@ async function loadPortfolio() {
         <td class="l"><span class="tag ${x.status === "DONE" ? "keep" : x.status === "BLOCKED" ? "OUT" : "gray"}">${esc(x.status)}</span></td>
         <td class="num">${inr(x.nav)}</td></tr>`).join("")
         : `<tr><td colspan="4" class="l muted" style="padding:18px 10px">Abhi koi run nahi hua.</td></tr>`) + `</tbody>`;
+    // NAV history line chart
+    try{
+      if(r.runs && r.runs.length>1 && window.Chart){
+        const rev = [...r.runs].reverse();
+        const labels = rev.map(x=> (x.run_id||"").slice(1,9));
+        const vals = rev.map(x=> x.nav||0);
+        const c=document.getElementById("navChart");
+        if(c){
+          if(c._chart) c._chart.destroy();
+          c._chart = new Chart(c.getContext("2d"),{
+            type:"line",
+            data:{ labels, datasets:[{ data:vals, borderColor:"#2563eb", backgroundColor:"rgba(37,99,235,.08)", fill:true, tension:.4, pointRadius:3, pointBackgroundColor:"#2563eb" }]},
+            options:{
+              plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:(ctx)=> inr(ctx.parsed.y) } } },
+              scales:{ x:{ grid:{display:false}, ticks:{ maxTicksLimit:6 }}, y:{ grid:{ color:"rgba(148,163,184,.12)"}, ticks:{ callback:v=>inr(v)} } },
+              animation:{ duration:400}
+            }
+          });
+        }
+      }
+    }catch(e){}
   } catch (e) { /* ignore */ }
 }
 $("#portRefresh").onclick = loadPortfolio;
@@ -927,9 +1127,37 @@ $("#clearBtn").onclick = async () => {
   } catch (e) { alert(e.message); }
 };
 
+/* ---- extra world-class handlers ---- */
+$("#runsRefreshBtn") && ($("#runsRefreshBtn").onclick = ()=> loadPortfolio());
+document.addEventListener("keydown", (e)=>{
+  if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="k"){
+    e.preventDefault(); toast("Quick: 1 Connect • 2 Watchlist • 3 Plan • 4 Execute","info");
+    const t = prompt("Go to: 1=Connect, 2=Watchlist, 3=Plan, 4=Execute, H=Home, P=Portfolio");
+    if(t==="1") showTab("tConn"); if(t==="2") showTab("tUpload"); if(t==="3") showTab("tPlan"); if(t==="4") showTab("tExec"); if(t && t.toLowerCase()==="h") showTab("tHome"); if(t && t.toLowerCase()==="p") showTab("tPort");
+  }
+  if(e.key==="?" && !e.ctrlKey && !e.metaKey){ toast("Shortcuts: ⌘K quick, 1-4 tabs, ? help","info"); }
+});
+// toast on key actions (wrap original functions)
+const _origUpload = upload;
+upload = async function(file){
+  const r = await _origUpload(file);
+  if(WL) toast(`${WL.count} stocks loaded ✓`,"good");
+  return r;
+};
+const _origMakePlan = makePlan;
+makePlan = async function(){
+  const r = await _origMakePlan();
+  if(PLAN && !PLAN.blockers.length) toast(`Plan ready: ${PLAN.orders.length} orders`,"good");
+  else if(PLAN && PLAN.blockers.length) toast("Plan blocked","bad");
+  return r;
+};
+// hide cmd hint after 8s
+setTimeout(()=>{ const h=document.getElementById("cmdHint"); if(h) h.style.opacity="0"; setTimeout(()=>h&&h.remove(), 600); }, 8000);
+
 const _origShowTab = showTab;
-showTab = function (id) { _origShowTab(id); if (id === "tConn") loadCreds(); };
+showTab = function (id) { _origShowTab(id); if (id === "tConn") loadCreds(); if(id==="tPort") loadPortfolio(); };
 window.showTab = showTab;
 $$("nav.tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
 loadCreds();
+toast("Welcome — world-class rebalancer ready ✦","info");
