@@ -222,33 +222,51 @@ class Store:
                       (at, nav, holdings_value, free_cash, source))
 
     def get_nav_history(self, limit: int = 120, timeframe: str = "daily") -> list[dict]:
-        # timeframe: daily = raw, weekly = resample to Friday close (or last per week)
+        # timeframe: daily / weekly / monthly / yearly
+        # fetch enough raw rows to cover resampling (yearly needs more)
+        fetch_mult = {"daily": 1, "weekly": 7, "monthly": 31, "yearly": 366}.get(timeframe, 7)
         with self._conn() as c:
-            rows = [dict(r) for r in c.execute("SELECT * FROM nav_history ORDER BY captured_at ASC LIMIT ?", (limit*7,))]
+            rows = [dict(r) for r in c.execute("SELECT * FROM nav_history ORDER BY captured_at ASC LIMIT ?", (limit*fetch_mult,))]
         if not rows:
             return []
+        from collections import OrderedDict
         if timeframe == "weekly":
             # group by ISO year-week, take last per week
-            from collections import OrderedDict
-            weekly = OrderedDict()
+            grouped = OrderedDict()
             for r in rows:
-                # parse date
                 try:
                     import datetime as dt
                     d = dt.datetime.fromisoformat(r["captured_at"].replace("Z","+00:00"))
                     key = f"{d.isocalendar()[0]}-W{d.isocalendar()[1]:02d}"
-                    weekly[key] = r
+                    grouped[key] = r
                 except:
-                    weekly[r["captured_at"][:10]] = r
-            rows = list(weekly.values())[-limit:]
+                    grouped[r["captured_at"][:10]] = r
+            rows = list(grouped.values())[-limit:]
+        elif timeframe == "monthly":
+            grouped = OrderedDict()
+            for r in rows:
+                try:
+                    key = r["captured_at"][:7]  # YYYY-MM
+                    grouped[key] = r
+                except:
+                    grouped[r["captured_at"][:10]] = r
+            rows = list(grouped.values())[-limit:]
+        elif timeframe == "yearly":
+            grouped = OrderedDict()
+            for r in rows:
+                try:
+                    key = r["captured_at"][:4]  # YYYY
+                    grouped[key] = r
+                except:
+                    grouped[r["captured_at"][:10]] = r
+            rows = list(grouped.values())[-limit:]
         else:
             # daily: group by date, take last per day
-            from collections import OrderedDict
-            daily = OrderedDict()
+            grouped = OrderedDict()
             for r in rows:
                 key = r["captured_at"][:10]
-                daily[key] = r
-            rows = list(daily.values())[-limit:]
+                grouped[key] = r
+            rows = list(grouped.values())[-limit:]
         return rows
 
     def calc_ema(self, values: list[float], period: int) -> list[float | None]:

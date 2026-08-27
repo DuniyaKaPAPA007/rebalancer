@@ -910,7 +910,13 @@ async function loadNavTrack(){
     if(c && c._chart) { c._chart.destroy(); c._chart=null; }
     return;
   }
-  const labels = hist.map(r=> (r.captured_at||"").slice(5,10));
+  const labels = hist.map(r=>{
+    const ca=r.captured_at||"";
+    if(navTf==="yearly") return ca.slice(0,4);
+    if(navTf==="monthly") return ca.slice(0,7);
+    if(navTf==="weekly") return ca.slice(5,10);
+    return ca.slice(5,10);
+  });
   const navs = hist.map(r=> r.nav);
   let datasets = [{ label:"NAV", data:navs, borderColor:"#0f172a", backgroundColor:"rgba(15,23,42,.04)", fill:false, tension:.35, pointRadius:0, borderWidth:2 }];
   const paletteEmas = ["#2563eb","#059669","#ea580c","#7c3aed","#eab308"];
